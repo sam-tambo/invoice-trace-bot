@@ -1,80 +1,118 @@
 
-# InvoiceTrace — Portuguese Accounting Invoice Recovery App
 
-## Overview
-A full-featured app in Portuguese that helps business owners track down missing invoices, auto-contact suppliers, and follow up until every invoice is recovered. Clean, CRM-style dashboard with blue/green accents.
+# Redesign Import Page: PDF Parsing, Agent Actions, and Invoice Upload
 
----
+## What We're Building
 
-## 1. Authentication & Multi-Company Support
-- Email/password login via Supabase Auth
-- User profile with ability to manage multiple companies under one account
-- Company switcher in the sidebar/header
-- All data scoped to the selected company
-
-## 2. Onboarding Flow
-- Quick 3-step wizard: Upload invoice list → Review/confirm suppliers → Customize message templates → Launch
-- Progress indicator showing completion
-- Under 2 minutes to get started
-
-## 3. Invoice Import
-- **CSV/Excel upload** with column mapping (NIF, invoice number, supplier name, amount, date range)
-- **Manual paste/entry** form as alternative
-- Validation and duplicate detection
-- Imported invoices default to "Missing" status
-
-## 4. Smart Company Lookup
-- For each NIF, use a Supabase edge function to search **Racius.com** and **Google** to find supplier details
-- Extract: legal name, NIF, registered address, contact email, phone number
-- Display a confidence score per match
-- Allow users to manually edit/override any found details
-- Cache results to avoid repeated lookups
-
-## 5. Invoice Tracking Dashboard
-- **Table view** with columns: Supplier, NIF, Invoice Ref, Amount, Days Outstanding, Last Contact, Status
-- **Color-coded rows**: Red (no contact), Yellow (contacted/awaiting), Green (received)
-- **Status badges**: Missing → Contacted → Received → Closed
-- **Filters** by status, supplier, date range
-- **Click any row** to expand full contact history and timeline
-- **Progress bar** showing "X of Y invoices recovered" — turns green when complete
-
-## 6. Message Templates & Outreach
-- Pre-written Portuguese email templates for Day 0, Day 3, and Day 7
-- **Tone toggle**: Formal / Friendly
-- User can edit templates before sending
-- Templates include dynamic placeholders (supplier name, invoice ref, amount, etc.)
-
-## 7. Automated Outreach Engine (via Supabase Edge Functions)
-- **Day 0**: Send polite email via **Resend** requesting the missing invoice
-- **Day 3**: Follow-up email + SMS via **Twilio** (or WhatsApp if available)
-- **Day 7**: Final notice email, flag for manual follow-up in dashboard
-- Scheduled via Supabase cron jobs (pg_cron)
-- All outreach logged with timestamps in contact history
-
-## 8. Invoice Receipt & Matching
-- Manual option: mark invoice as received + upload PDF/image
-- File storage via Supabase Storage
-- Full history of received documents per invoice
-- **Export**: One-click ZIP download of all recovered invoices, or forward to accountant's email
-
-## 9. Reporting & Notifications
-- Weekly summary email to the accountant showing recovery rate
-- Dashboard stats: total missing, contacted, recovered, recovery rate %
-- 🎉 Confetti animation when all invoices are marked as received
-
-## 10. Design & UX
-- **Language**: Entire UI in Portuguese
-- **Style**: Clean, minimal, professional — white base with blue (#2563EB) and green (#16A34A) accents
-- Cards with subtle shadows, no clutter
-- Mobile-responsive for on-the-go use
-- CRM-like dashboard feel — warm but businesslike
+The import page will be completely redesigned to handle the **TOConline "Mapa de conferencia e-Fatura" PDF format**, display imported invoices in a rich table with supplier match status, and provide agent actions for bulk and individual invoice recovery.
 
 ---
 
-## Technical Architecture
-- **Frontend**: React + TypeScript + Tailwind + shadcn/ui
-- **Backend**: Supabase (Auth, Database, Edge Functions, Storage)
-- **Email**: Resend (via edge function)
-- **SMS**: Twilio (via edge function)
-- **Company Lookup**: Firecrawl or direct scraping of Racius.com via edge function
-- **Scheduling**: pg_cron for automated follow-ups
+## 1. PDF Parsing Edge Function
+
+Create a backend function (`parse-efatura-pdf`) that:
+- Accepts a PDF file upload
+- Uses an AI model (Lovable AI - Gemini 2.5 Flash) to extract the table data from the PDF
+- Returns structured rows with: NIF, Date, Invoice Number (Doc. Compra), Net Amount, VAT, Total, Status
+- Handles the multi-page TOConline format (repeated headers, page footers)
+
+The PDF columns map as follows:
+| PDF Column | Database Field |
+|---|---|
+| Numero do documento do fornecedor | `supplier_nif` |
+| Data | `issue_date` |
+| Doc. Compra | `invoice_number` |
+| Valor liquido | stored as metadata |
+| IVA | stored as metadata |
+| Total do documento e-fatura | `amount` |
+
+## 2. Redesigned Import Page (`/import`)
+
+Replace the current CSV-only import with a new flow:
+
+**Step 1 - Upload**: Accept PDF (`.pdf`) or CSV files. Show drag-and-drop area.
+
+**Step 2 - Review Table**: After parsing, display all extracted invoices in a table matching the PDF layout:
+- NIF | Fornecedor | Doc. Compra | Data | Valor Liquido | IVA | Total | Fornecedor Encontrado?
+- The "Fornecedor Encontrado?" column shows a green check if the NIF already exists in the `suppliers` table with an email, or a red X if not
+- Checkboxes for selecting individual rows
+- "Select All" checkbox in the header
+
+**Step 3 - Actions**:
+- **"Importar Selecionadas"** button to save selected invoices to the database
+- **"Procurar Fornecedores em Massa"** (Bulk Agent) button: triggers NIF lookups for all unmatched suppliers via Firecrawl
+- **"Procurar"** button per row: triggers individual NIF lookup
+
+## 3. Agent: Find Invoices (Bulk and Individual)
+
+Create an edge function (`nif-lookup`) that:
+- Takes a NIF and uses Firecrawl to search `racius.com` + Google for the company
+- Extracts: legal name, address, email, phone
+- Stores/updates the `suppliers` table with found data and confidence score
+- Returns the result to the frontend
+
+**Requires**: Firecrawl connector to be set up (we'll prompt the user to connect it).
+
+## 4. Invoice Upload and Email Matching
+
+Add two ways to submit received invoices:
+
+**A. Upload Invoice File**: 
+- Button per invoice row to upload a PDF/image of the received invoice
+- Stores in the `invoice-files` storage bucket (already exists)
+- Creates an `attachments` record
+- Updates invoice status to "received"
+
+**B. Email-to-Agent** (forward invoice by email):
+- Create an edge function (`receive-invoice-email`) that accepts inbound emails (via Resend webhook)
+- Parses the email for invoice references (NIF, invoice number)
+- Matches against existing missing invoices
+- Stores the attachment and marks the invoice as received
+- This requires Resend integration (will be set up in a follow-up step)
+
+## 5. Database Changes
+
+Add columns to the `invoices` table for the additional PDF data:
+- `net_amount` (numeric, nullable) - Valor liquido
+- `vat_amount` (numeric, nullable) - IVA
+
+## Technical Details
+
+### Files to Create:
+1. `supabase/functions/parse-efatura-pdf/index.ts` - PDF parsing via Lovable AI
+2. `supabase/functions/nif-lookup/index.ts` - Supplier lookup via Firecrawl
+3. `src/pages/ImportInvoices.tsx` - Complete rewrite with new flow
+
+### Files to Modify:
+1. Database migration - add `net_amount`, `vat_amount` to `invoices`
+
+### Dependencies:
+- Firecrawl connector needed for NIF lookups (will prompt user)
+- Resend connector needed for email agent (future step)
+
+### Edge Function Flow:
+
+```text
+PDF Upload --> parse-efatura-pdf (AI extraction) --> Structured JSON
+                                                        |
+                                                        v
+                                               Review Table in UI
+                                                        |
+                                        +---------------+---------------+
+                                        |                               |
+                                   Import to DB                  NIF Lookup
+                                        |                    (Firecrawl/Racius)
+                                        v                               |
+                                  invoices table                        v
+                                        |                       suppliers table
+                                        v
+                              Upload received invoice
+                                        |
+                                        v
+                              invoice-files bucket + attachments table
+                              + status -> "received"
+```
+
+### RLS Note:
+All existing RLS policies remain. The new columns are part of the existing `invoices` table which already has proper policies. The edge functions will use the service role key for internal operations.
+
