@@ -19,9 +19,17 @@ const Onboarding = () => {
   const [companyNif, setCompanyNif] = useState("");
   const [loading, setLoading] = useState(false);
 
+  const isValidNif = (nif: string) => /^\d{9}$/.test(nif);
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!user) return;
+
+    if (companyNif && !isValidNif(companyNif)) {
+      toast({ title: "NIF inválido", description: "O NIF português deve conter exatamente 9 dígitos.", variant: "destructive" });
+      return;
+    }
+
     setLoading(true);
 
     try {
@@ -69,7 +77,7 @@ const Onboarding = () => {
             </div>
             <div className="space-y-2">
               <Label htmlFor="company-nif">NIF (opcional)</Label>
-              <Input id="company-nif" placeholder="123456789" value={companyNif} onChange={(e) => setCompanyNif(e.target.value)} />
+              <Input id="company-nif" placeholder="123456789" maxLength={9} value={companyNif} onChange={(e) => setCompanyNif(e.target.value.replace(/\D/g, "").slice(0, 9))} />
             </div>
             <Button type="submit" className="w-full" disabled={loading}>
               {loading ? "A criar..." : "Criar Empresa"}
