@@ -21,8 +21,8 @@ serve(async (req) => {
       );
     }
 
-    const LOVABLE_API_KEY = Deno.env.get("LOVABLE_API_KEY");
-    if (!LOVABLE_API_KEY) throw new Error("LOVABLE_API_KEY not configured");
+    const ANTHROPIC_API_KEY = Deno.env.get("ANTHROPIC_API_KEY");
+    if (!ANTHROPIC_API_KEY) throw new Error("ANTHROPIC_API_KEY not configured");
 
     const { nif, company_id } = await req.json();
     if (!nif || !company_id) {
@@ -88,47 +88,23 @@ serve(async (req) => {
       });
     }
 
-    const aiResponse = await fetch("https://ai.gateway.lovable.dev/v1/chat/completions", {
+    const aiResponse = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
       headers: {
-        Authorization: `Bearer ${LOVABLE_API_KEY}`,
+        "x-api-key": ANTHROPIC_API_KEY,
+        "anthropic-version": "2023-06-01",
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
-        model: "google/gemini-2.5-flash-lite",
+        model: "claude-sonnet-4-20250514",
+        max_tokens: 1024,
+        system: "Extract company information from the provided web data. Return ONLY a valid JSON object with these fields: legal_name, name, address, email, phone, confidence_score (0-100). No markdown, no code blocks.",
         messages: [
-          {
-            role: "system",
-            content: "Extract company information from the provided web data. Return structured data using the tool provided.",
-          },
           {
             role: "user",
             content: `Extract company info for NIF ${nif} from this data:\n\n${context}`,
           },
         ],
-        tools: [
-          {
-            type: "function",
-            function: {
-              name: "extract_company",
-              description: "Extract structured company data",
-              parameters: {
-                type: "object",
-                properties: {
-                  legal_name: { type: "string", description: "Company legal name" },
-                  name: { type: "string", description: "Company trade/short name" },
-                  address: { type: "string", description: "Company address" },
-                  email: { type: "string", description: "Company email" },
-                  phone: { type: "string", description: "Company phone" },
-                  confidence_score: { type: "number", description: "0-100 confidence in data quality" },
-                },
-                required: ["legal_name", "name", "confidence_score"],
-                additionalProperties: false,
-              },
-            },
-          },
-        ],
-        tool_choice: { type: "function", function: { name: "extract_company" } },
       }),
     });
 
@@ -142,14 +118,18 @@ serve(async (req) => {
     }
 
     const aiData = await aiResponse.json();
-    const toolCall = aiData.choices?.[0]?.message?.tool_calls?.[0];
-    if (!toolCall) {
+    const textContent = aiData.content?.find((c: any) => c.type === "text")?.text;
+    if (!textContent) {
       return new Response(JSON.stringify({ success: false, error: "Could not extract company data" }), {
         headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
     }
 
-    const companyInfo = JSON.parse(toolCall.function.arguments);
+    let jsonStr = textContent.trim();
+    if (jsonStr.startsWith("```")) {
+      jsonStr = jsonStr.replace(/^```(?:json)?\n?/, "").replace(/\n?```$/, "");
+    }
+    const companyInfo = JSON.parse(jsonStr);
 
     // Step 4: Upsert supplier in database
     const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
