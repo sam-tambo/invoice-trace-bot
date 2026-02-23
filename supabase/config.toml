@@ -1,1 +1,7 @@
 project_id = "uxttxsscvirkgvnltvfd"
+
+[functions.parse-efatura-pdf]
+verify_jwt = false
+
+[functions.nif-lookup]
+verify_jwt = false

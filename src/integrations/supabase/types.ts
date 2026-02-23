@@ -135,11 +135,13 @@ export type Database = {
           invoice_number: string
           issue_date: string | null
           last_contact_at: string | null
+          net_amount: number | null
           status: string
           supplier_id: string | null
           supplier_name: string
           supplier_nif: string
           updated_at: string
+          vat_amount: number | null
         }
         Insert: {
           amount?: number | null
@@ -151,11 +153,13 @@ export type Database = {
           invoice_number: string
           issue_date?: string | null
           last_contact_at?: string | null
+          net_amount?: number | null
           status?: string
           supplier_id?: string | null
           supplier_name?: string
           supplier_nif?: string
           updated_at?: string
+          vat_amount?: number | null
         }
         Update: {
           amount?: number | null
@@ -167,11 +171,13 @@ export type Database = {
           invoice_number?: string
           issue_date?: string | null
           last_contact_at?: string | null
+          net_amount?: number | null
           status?: string
           supplier_id?: string | null
           supplier_name?: string
           supplier_nif?: string
           updated_at?: string
+          vat_amount?: number | null
         }
         Relationships: [
           {
