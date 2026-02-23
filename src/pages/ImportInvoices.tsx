@@ -1,16 +1,36 @@
-import { useState, useRef } from "react";
+import { useState, useRef, useCallback } from "react";
 import { useCompany } from "@/hooks/useCompany";
 import { useAuth } from "@/hooks/useAuth";
 import { supabase } from "@/integrations/supabase/client";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { Textarea } from "@/components/ui/textarea";
+import { Checkbox } from "@/components/ui/checkbox";
 import { useToast } from "@/hooks/use-toast";
-import { Upload, FileSpreadsheet, Plus, Loader2 } from "lucide-react";
+import { Upload, Loader2, Search, CheckCircle2, XCircle, FileUp } from "lucide-react";
 import { useNavigate } from "react-router-dom";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
+
+type ParsedInvoice = {
+  supplier_nif: string;
+  issue_date: string;
+  invoice_number: string;
+  net_amount: number;
+  vat_amount: number;
+  amount: number;
+};
+
+type InvoiceRow = ParsedInvoice & {
+  selected: boolean;
+  supplierFound: boolean | null; // null = not checked yet
+  lookingUp: boolean;
+};
 
 const ImportInvoices = () => {
   const { selectedCompany } = useCompany();
@@ -18,162 +38,336 @@ const ImportInvoices = () => {
   const { toast } = useToast();
   const navigate = useNavigate();
   const fileRef = useRef<HTMLInputElement>(null);
-  const [loading, setLoading] = useState(false);
-  const [csvData, setCsvData] = useState("");
 
-  // Manual entry
-  const [manualEntries, setManualEntries] = useState([
-    { supplier_name: "", supplier_nif: "", invoice_number: "", amount: "", issue_date: "" },
-  ]);
+  const [step, setStep] = useState<"upload" | "review">("upload");
+  const [parsing, setParsing] = useState(false);
+  const [importing, setImporting] = useState(false);
+  const [bulkLooking, setBulkLooking] = useState(false);
+  const [rows, setRows] = useState<InvoiceRow[]>([]);
 
-  const addManualRow = () => {
-    setManualEntries([...manualEntries, { supplier_name: "", supplier_nif: "", invoice_number: "", amount: "", issue_date: "" }]);
-  };
+  // Check which NIFs already exist as suppliers with email
+  const checkSuppliers = useCallback(
+    async (invoices: ParsedInvoice[]) => {
+      if (!selectedCompany) return invoices.map((inv) => ({ ...inv, selected: true, supplierFound: null, lookingUp: false }));
 
-  const updateManualRow = (idx: number, field: string, value: string) => {
-    const updated = [...manualEntries];
-    (updated[idx] as any)[field] = value;
-    setManualEntries(updated);
-  };
+      const uniqueNifs = [...new Set(invoices.map((i) => i.supplier_nif).filter(Boolean))];
+      const { data: suppliers } = await supabase
+        .from("suppliers")
+        .select("nif, email")
+        .eq("company_id", selectedCompany.id)
+        .in("nif", uniqueNifs);
 
-  const parseCSV = (text: string) => {
-    const lines = text.trim().split("\n");
-    if (lines.length < 2) return [];
-    const headers = lines[0].split(/[,;\t]/).map((h) => h.trim().toLowerCase());
-    return lines.slice(1).map((line) => {
-      const values = line.split(/[,;\t]/);
-      const row: any = {};
-      headers.forEach((h, i) => {
-        row[h] = values[i]?.trim() || "";
+      const foundMap = new Map<string, boolean>();
+      suppliers?.forEach((s) => {
+        foundMap.set(s.nif, !!s.email);
       });
-      return {
-        supplier_name: row["fornecedor"] || row["supplier"] || row["nome"] || "",
-        supplier_nif: row["nif"] || row["vat"] || "",
-        invoice_number: row["fatura"] || row["invoice"] || row["numero"] || row["nº"] || "",
-        amount: row["valor"] || row["amount"] || row["montante"] || "",
-        issue_date: row["data"] || row["date"] || "",
-      };
-    });
-  };
 
-  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+      return invoices.map((inv) => ({
+        ...inv,
+        selected: true,
+        supplierFound: foundMap.has(inv.supplier_nif) ? foundMap.get(inv.supplier_nif)! : false,
+        lookingUp: false,
+      }));
+    },
+    [selectedCompany]
+  );
+
+  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
-    const reader = new FileReader();
-    reader.onload = (ev) => {
-      const text = ev.target?.result as string;
-      setCsvData(text);
-    };
-    reader.readAsText(file);
+
+    setParsing(true);
+    try {
+      const formData = new FormData();
+      formData.append("file", file);
+
+      const response = await fetch(
+        `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/parse-efatura-pdf`,
+        {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY}`,
+          },
+          body: formData,
+        }
+      );
+
+      const data = await response.json();
+
+      if (!response.ok || !data.success) {
+        toast({ title: "Erro", description: data.error || "Falha ao processar PDF", variant: "destructive" });
+        return;
+      }
+
+      const enriched = await checkSuppliers(data.invoices);
+      setRows(enriched);
+      setStep("review");
+      toast({ title: "PDF processado", description: `${data.invoices.length} faturas extraídas.` });
+    } catch (err) {
+      console.error(err);
+      toast({ title: "Erro", description: "Falha ao enviar ficheiro.", variant: "destructive" });
+    } finally {
+      setParsing(false);
+      if (fileRef.current) fileRef.current.value = "";
+    }
   };
 
-  const submitInvoices = async (entries: { supplier_name: string; supplier_nif: string; invoice_number: string; amount: string; issue_date: string }[]) => {
-    if (!selectedCompany || !user) return;
-    setLoading(true);
+  const toggleAll = (checked: boolean) => {
+    setRows((prev) => prev.map((r) => ({ ...r, selected: checked })));
+  };
 
-    const valid = entries.filter((e) => e.invoice_number.trim());
-    if (valid.length === 0) {
-      toast({ title: "Erro", description: "Nenhuma fatura válida encontrada.", variant: "destructive" });
-      setLoading(false);
+  const toggleRow = (idx: number) => {
+    setRows((prev) => prev.map((r, i) => (i === idx ? { ...r, selected: !r.selected } : r)));
+  };
+
+  const handleImport = async () => {
+    if (!selectedCompany || !user) return;
+    const selected = rows.filter((r) => r.selected);
+    if (selected.length === 0) {
+      toast({ title: "Erro", description: "Selecione pelo menos uma fatura.", variant: "destructive" });
       return;
     }
 
-    const rows = valid.map((e) => ({
+    setImporting(true);
+    const insertRows = selected.map((r) => ({
       company_id: selectedCompany.id,
       created_by: user.id,
-      invoice_number: e.invoice_number.trim(),
-      supplier_name: e.supplier_name.trim(),
-      supplier_nif: e.supplier_nif.trim(),
-      amount: e.amount ? parseFloat(e.amount) : null,
-      issue_date: e.issue_date || null,
+      invoice_number: r.invoice_number,
+      supplier_name: "",
+      supplier_nif: r.supplier_nif,
+      amount: r.amount,
+      net_amount: r.net_amount,
+      vat_amount: r.vat_amount,
+      issue_date: r.issue_date || null,
       status: "missing" as const,
     }));
 
-    const { error } = await supabase.from("invoices").insert(rows);
+    const { error } = await supabase.from("invoices").insert(insertRows);
 
     if (error) {
       toast({ title: "Erro", description: error.message, variant: "destructive" });
     } else {
-      toast({ title: "Importação concluída", description: `${rows.length} faturas importadas.` });
+      toast({ title: "Importação concluída", description: `${insertRows.length} faturas importadas.` });
       navigate("/invoices");
     }
-    setLoading(false);
+    setImporting(false);
+  };
+
+  const lookupSingleNif = async (idx: number) => {
+    if (!selectedCompany) return;
+    setRows((prev) => prev.map((r, i) => (i === idx ? { ...r, lookingUp: true } : r)));
+
+    try {
+      const { data, error } = await supabase.functions.invoke("nif-lookup", {
+        body: { nif: rows[idx].supplier_nif, company_id: selectedCompany.id },
+      });
+
+      if (error || !data?.success) {
+        toast({ title: "Erro", description: data?.error || "Falha na pesquisa", variant: "destructive" });
+      } else {
+        const hasEmail = !!data.supplier?.email;
+        setRows((prev) =>
+          prev.map((r, i) => (i === idx ? { ...r, supplierFound: hasEmail } : r))
+        );
+        toast({
+          title: hasEmail ? "Fornecedor encontrado!" : "Fornecedor encontrado (sem email)",
+          description: `${data.supplier.name || data.supplier.legal_name}`,
+        });
+      }
+    } catch {
+      toast({ title: "Erro", description: "Falha na pesquisa do NIF", variant: "destructive" });
+    } finally {
+      setRows((prev) => prev.map((r, i) => (i === idx ? { ...r, lookingUp: false } : r)));
+    }
+  };
+
+  const bulkLookup = async () => {
+    if (!selectedCompany) return;
+    const unmatched = rows
+      .map((r, i) => ({ ...r, idx: i }))
+      .filter((r) => !r.supplierFound && r.supplier_nif);
+    const uniqueNifs = [...new Set(unmatched.map((r) => r.supplier_nif))];
+
+    if (uniqueNifs.length === 0) {
+      toast({ title: "Info", description: "Todos os fornecedores já foram encontrados." });
+      return;
+    }
+
+    setBulkLooking(true);
+    let found = 0;
+
+    for (const nif of uniqueNifs) {
+      try {
+        const { data } = await supabase.functions.invoke("nif-lookup", {
+          body: { nif, company_id: selectedCompany.id },
+        });
+        const hasEmail = !!data?.supplier?.email;
+        if (data?.success) {
+          found++;
+          setRows((prev) =>
+            prev.map((r) => (r.supplier_nif === nif ? { ...r, supplierFound: hasEmail } : r))
+          );
+        }
+      } catch {
+        // Continue with next NIF
+      }
+    }
+
+    toast({ title: "Pesquisa concluída", description: `${found}/${uniqueNifs.length} fornecedores encontrados.` });
+    setBulkLooking(false);
   };
 
   if (!selectedCompany) {
     return <p className="text-muted-foreground py-10 text-center">Selecione uma empresa primeiro.</p>;
   }
 
+  const allSelected = rows.length > 0 && rows.every((r) => r.selected);
+  const someSelected = rows.some((r) => r.selected);
+
   return (
-    <div className="space-y-6 max-w-3xl">
+    <div className="space-y-6">
       <div>
         <h1 className="text-2xl font-bold">Importar Faturas</h1>
-        <p className="text-muted-foreground">Carregue um ficheiro CSV ou insira faturas manualmente.</p>
+        <p className="text-muted-foreground">
+          Carregue o mapa de conferência e-Fatura (PDF do TOConline) para importar faturas pendentes.
+        </p>
       </div>
 
-      <Tabs defaultValue="csv">
-        <TabsList>
-          <TabsTrigger value="csv"><FileSpreadsheet className="mr-2 h-4 w-4" />Ficheiro CSV</TabsTrigger>
-          <TabsTrigger value="manual"><Plus className="mr-2 h-4 w-4" />Entrada Manual</TabsTrigger>
-        </TabsList>
-
-        <TabsContent value="csv" className="space-y-4">
-          <Card>
-            <CardHeader>
-              <CardTitle className="text-base">Carregar CSV</CardTitle>
-              <CardDescription>
-                O ficheiro deve conter colunas: fornecedor, nif, fatura, valor, data. Separador: vírgula, ponto e vírgula ou tab.
-              </CardDescription>
-            </CardHeader>
-            <CardContent className="space-y-4">
-              <div>
-                <input ref={fileRef} type="file" accept=".csv,.txt" className="hidden" onChange={handleFileUpload} />
-                <Button variant="outline" onClick={() => fileRef.current?.click()}>
-                  <Upload className="mr-2 h-4 w-4" />
-                  Selecionar Ficheiro
-                </Button>
-              </div>
-              <div className="space-y-2">
-                <Label>Ou cole o conteúdo CSV:</Label>
-                <Textarea rows={8} placeholder="fornecedor;nif;fatura;valor;data&#10;Empresa ABC;123456789;FT 2025/001;150.00;2025-01-15" value={csvData} onChange={(e) => setCsvData(e.target.value)} />
-              </div>
-              <Button onClick={() => submitInvoices(parseCSV(csvData))} disabled={loading || !csvData.trim()}>
-                {loading && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
-                Importar Faturas
-              </Button>
-            </CardContent>
-          </Card>
-        </TabsContent>
-
-        <TabsContent value="manual" className="space-y-4">
-          <Card>
-            <CardHeader>
-              <CardTitle className="text-base">Entrada Manual</CardTitle>
-              <CardDescription>Adicione faturas uma a uma.</CardDescription>
-            </CardHeader>
-            <CardContent className="space-y-3">
-              {manualEntries.map((entry, idx) => (
-                <div key={idx} className="grid grid-cols-5 gap-2">
-                  <Input placeholder="Fornecedor" value={entry.supplier_name} onChange={(e) => updateManualRow(idx, "supplier_name", e.target.value)} />
-                  <Input placeholder="NIF" value={entry.supplier_nif} onChange={(e) => updateManualRow(idx, "supplier_nif", e.target.value)} />
-                  <Input placeholder="Nº Fatura" value={entry.invoice_number} onChange={(e) => updateManualRow(idx, "invoice_number", e.target.value)} />
-                  <Input placeholder="Valor" type="number" value={entry.amount} onChange={(e) => updateManualRow(idx, "amount", e.target.value)} />
-                  <Input placeholder="Data" type="date" value={entry.issue_date} onChange={(e) => updateManualRow(idx, "issue_date", e.target.value)} />
+      {step === "upload" && (
+        <Card className="max-w-xl">
+          <CardHeader>
+            <CardTitle className="text-base">Carregar PDF</CardTitle>
+            <CardDescription>
+              Selecione o ficheiro "Mapa de conferência e-Fatura" exportado do TOConline.
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <input
+              ref={fileRef}
+              type="file"
+              accept=".pdf"
+              className="hidden"
+              onChange={handleFileUpload}
+            />
+            <div
+              className="border-2 border-dashed rounded-lg p-10 text-center cursor-pointer hover:border-primary/50 transition-colors"
+              onClick={() => fileRef.current?.click()}
+            >
+              {parsing ? (
+                <div className="flex flex-col items-center gap-2">
+                  <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
+                  <p className="text-sm text-muted-foreground">A processar PDF com IA...</p>
                 </div>
-              ))}
-              <div className="flex gap-2">
-                <Button variant="outline" size="sm" onClick={addManualRow}>
-                  <Plus className="mr-2 h-4 w-4" />Adicionar Linha
-                </Button>
-                <Button size="sm" onClick={() => submitInvoices(manualEntries)} disabled={loading}>
-                  {loading && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
-                  Importar
-                </Button>
+              ) : (
+                <div className="flex flex-col items-center gap-2">
+                  <Upload className="h-8 w-8 text-muted-foreground" />
+                  <p className="text-sm text-muted-foreground">
+                    Clique ou arraste o ficheiro PDF aqui
+                  </p>
+                  <p className="text-xs text-muted-foreground">Formatos: PDF (TOConline)</p>
+                </div>
+              )}
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
+      {step === "review" && (
+        <div className="space-y-4">
+          <div className="flex items-center justify-between flex-wrap gap-2">
+            <div className="flex gap-2">
+              <Button onClick={handleImport} disabled={importing || !someSelected}>
+                {importing && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+                <FileUp className="mr-2 h-4 w-4" />
+                Importar Selecionadas ({rows.filter((r) => r.selected).length})
+              </Button>
+              <Button variant="outline" onClick={bulkLookup} disabled={bulkLooking}>
+                {bulkLooking && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+                <Search className="mr-2 h-4 w-4" />
+                Procurar Fornecedores em Massa
+              </Button>
+            </div>
+            <Button variant="ghost" size="sm" onClick={() => { setStep("upload"); setRows([]); }}>
+              Novo Upload
+            </Button>
+          </div>
+
+          <Card>
+            <CardContent className="p-0">
+              <div className="overflow-x-auto">
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead className="w-10">
+                        <Checkbox
+                          checked={allSelected}
+                          onCheckedChange={(checked) => toggleAll(!!checked)}
+                        />
+                      </TableHead>
+                      <TableHead>NIF</TableHead>
+                      <TableHead>Doc. Compra</TableHead>
+                      <TableHead>Data</TableHead>
+                      <TableHead className="text-right">Valor Líquido</TableHead>
+                      <TableHead className="text-right">IVA</TableHead>
+                      <TableHead className="text-right">Total</TableHead>
+                      <TableHead className="text-center">Fornecedor?</TableHead>
+                      <TableHead className="w-10"></TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {rows.map((row, idx) => (
+                      <TableRow key={idx} className={!row.selected ? "opacity-50" : undefined}>
+                        <TableCell>
+                          <Checkbox
+                            checked={row.selected}
+                            onCheckedChange={() => toggleRow(idx)}
+                          />
+                        </TableCell>
+                        <TableCell className="font-mono text-sm">{row.supplier_nif}</TableCell>
+                        <TableCell className="text-sm">{row.invoice_number}</TableCell>
+                        <TableCell className="text-sm">{row.issue_date}</TableCell>
+                        <TableCell className="text-right text-sm">
+                          {row.net_amount?.toLocaleString("pt-PT", { minimumFractionDigits: 2 })} €
+                        </TableCell>
+                        <TableCell className="text-right text-sm">
+                          {row.vat_amount?.toLocaleString("pt-PT", { minimumFractionDigits: 2 })} €
+                        </TableCell>
+                        <TableCell className="text-right font-medium text-sm">
+                          {row.amount?.toLocaleString("pt-PT", { minimumFractionDigits: 2 })} €
+                        </TableCell>
+                        <TableCell className="text-center">
+                          {row.supplierFound === true ? (
+                            <CheckCircle2 className="h-5 w-5 text-primary mx-auto" />
+                          ) : row.supplierFound === false ? (
+                            <XCircle className="h-5 w-5 text-destructive mx-auto" />
+                          ) : (
+                            <span className="text-muted-foreground text-xs">—</span>
+                          )}
+                        </TableCell>
+                        <TableCell>
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            onClick={() => lookupSingleNif(idx)}
+                            disabled={row.lookingUp || row.supplierFound === true}
+                            title="Procurar fornecedor"
+                          >
+                            {row.lookingUp ? (
+                              <Loader2 className="h-4 w-4 animate-spin" />
+                            ) : (
+                              <Search className="h-4 w-4" />
+                            )}
+                          </Button>
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
               </div>
             </CardContent>
           </Card>
-        </TabsContent>
-      </Tabs>
+        </div>
+      )}
     </div>
   );
 };
