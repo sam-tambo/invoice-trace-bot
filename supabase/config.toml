@@ -11,3 +11,12 @@ verify_jwt = false
 
 [functions.receive-email]
 verify_jwt = false
+
+[functions.gmail-auth-callback]
+verify_jwt = false
+
+[functions.scan-gmail-invoices]
+verify_jwt = false
+
+[functions.nylas-webhook]
+verify_jwt = false
