@@ -1,42 +1,84 @@
 
 
-# Fix Multi-Tenancy Security in Bulk Email
+# WhatsApp Outreach via Twilio
 
-## Problem
+## Overview
+Add WhatsApp messaging as an outreach channel alongside the existing email system. Uses a single shared Twilio number. Includes a webhook to receive supplier replies and route them to the correct company/invoice.
 
-The `send-bulk-email` edge function has a security gap: it accepts a `company_id` from the request body but does not verify that the authenticated user is a member of that company. Any logged-in user could potentially trigger bulk emails for another company.
+## Prerequisites -- Secrets Needed
+Two new secrets must be configured before this works:
+- **TWILIO_ACCOUNT_SID** -- your Twilio Account SID
+- **TWILIO_AUTH_TOKEN** -- your Twilio Auth Token
+- **TWILIO_WHATSAPP_NUMBER** -- the Twilio WhatsApp-enabled number (e.g. `whatsapp:+14155238886`)
 
 ## Changes
 
-### 1. Fix `send-bulk-email` edge function
+### 1. New Edge Function: `send-bulk-whatsapp`
+File: `supabase/functions/send-bulk-whatsapp/index.ts`
 
-Replace the `getClaims` auth check with `getUser()`, then verify company membership before proceeding:
+Mirrors the existing `send-bulk-email` logic but sends via Twilio WhatsApp API:
+- Authenticates user, verifies company membership
+- Fetches invoices with status "missing" (optionally filtered by invoice_ids)
+- For each invoice, checks if supplier has a **phone** number
+- Sends WhatsApp message via Twilio REST API (`POST https://api.twilio.com/2010-04-01/Accounts/{SID}/Messages.json`) with `From: whatsapp:+...` and `To: whatsapp:+{supplier_phone}`
+- Uses message template (same template system, text only -- WhatsApp doesn't support subject)
+- Updates invoice status to "contacted", logs to `outreach_logs` with `channel: "whatsapp"`, and saves to `inbox_messages`
 
-```text
-Current flow:
-  1. Check JWT exists
-  2. getClaims (may not work)
-  3. Trust company_id from body
-  4. Send emails
+### 2. New Edge Function: `receive-whatsapp`
+File: `supabase/functions/receive-whatsapp/index.ts`
 
-Fixed flow:
-  1. Check JWT exists
-  2. getUser() to get user ID
-  3. Query company_memberships to verify user belongs to company_id
-  4. Only then send emails
+Webhook endpoint for Twilio to POST incoming WhatsApp messages:
+- Receives Twilio webhook payload (form-encoded: `From`, `Body`, `NumMedia`, `MediaUrl0`, etc.)
+- Extracts phone number from `From` field (strips `whatsapp:` prefix)
+- Looks up supplier by phone number in `suppliers` table to find the `company_id` and `supplier_nif`
+- If media attachments exist (NumMedia > 0), downloads them and uploads to `invoice-files` storage bucket
+- Optionally runs AI parsing on PDF/image attachments (same logic as `receive-email`)
+- Tries to match to an existing invoice (status missing/contacted for that supplier)
+- Stores message in `inbox_messages` with `direction: "inbound"` and `from_email` set to the WhatsApp number
+- Returns TwiML `<Response/>` (empty, no auto-reply needed)
+
+Config in `supabase/config.toml`:
+```toml
+[functions.send-bulk-whatsapp]
+verify_jwt = false
+
+[functions.receive-whatsapp]
+verify_jwt = false
 ```
 
-Specific changes in `supabase/functions/send-bulk-email/index.ts`:
-- Replace `getClaims()` with `getUser()` to reliably get the user's ID
-- Add a membership check: query `company_memberships` table to confirm `user_id + company_id` match exists
-- Return 403 Forbidden if user is not a member of the requested company
+### 3. UI: Add WhatsApp button to Invoices page
+In `src/pages/Invoices.tsx`:
+- Add a "WhatsApp em Massa" button next to the existing "Pedir Faturas" email button
+- Shows count of suppliers with phone numbers (similar to email count)
 
-### 2. No other changes needed
+### 4. New Component: `BulkWhatsAppDialog`
+File: `src/components/BulkWhatsAppDialog.tsx`
 
-The rest of the system is already properly isolated:
-- **RLS policies** on `inbox_messages` use `is_company_member(company_id)` -- users can only read/update their own company's messages
-- **Inbox page** filters by `selectedCompany.id` and RLS enforces it server-side
-- **Realtime subscription** is filtered by `company_id`
-- **`receive-email` webhook** resolves `company_id` from the supplier lookup, not from user input
-- **`outreach_logs`** and **`invoices`** tables also have RLS scoped by `is_company_member`
+Similar to `BulkEmailDialog` but:
+- Shows count of missing invoices and count with phone numbers
+- Calls `send-bulk-whatsapp` edge function
+- Displays results (sent/skipped)
+
+### 5. Inbox Integration
+No schema changes needed -- `inbox_messages` already has all required fields. WhatsApp messages will appear in the inbox alongside emails, distinguished by the phone number in `from_email`/`to_email` fields.
+
+## Technical Details
+
+### Twilio WhatsApp API call (in edge function):
+```text
+POST https://api.twilio.com/2010-04-01/Accounts/{ACCOUNT_SID}/Messages.json
+Authorization: Basic base64(ACCOUNT_SID:AUTH_TOKEN)
+Content-Type: application/x-www-form-urlencoded
+
+From=whatsapp:+14155238886&To=whatsapp:+351912345678&Body=...
+```
+
+### Twilio Webhook Setup (manual step for user)
+After deployment, the user needs to configure the Twilio webhook URL in their Twilio console:
+- Go to Twilio Console > Messaging > WhatsApp Sandbox (or production sender)
+- Set "When a message comes in" URL to: `https://uxttxsscvirkgvnltvfd.supabase.co/functions/v1/receive-whatsapp`
+- Method: POST
+
+### Phone number format
+Supplier phone numbers in the `suppliers` table should be in E.164 format (e.g. `+351912345678`). The edge function will normalize by stripping spaces/dashes before sending.
 
