@@ -29,7 +29,7 @@ const GmailConnectionCard = () => {
     setLoading(false);
   }, [selectedCompany]);
 
-  // Fetch Google Client ID from edge function
+  // Fetch Nylas Client ID from edge function
   useEffect(() => {
     const fetchClientId = async () => {
       try {
@@ -41,7 +41,7 @@ const GmailConnectionCard = () => {
         const data = await res.json();
         if (data.client_id) setClientId(data.client_id);
       } catch (e) {
-        console.error("Failed to fetch Google Client ID:", e);
+        console.error("Failed to fetch Nylas Client ID:", e);
       }
     };
     fetchClientId();
@@ -51,13 +51,12 @@ const GmailConnectionCard = () => {
     fetchConnection();
   }, [fetchConnection]);
 
-  // Handle OAuth callback
+  // Handle Nylas OAuth callback
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const code = params.get("code");
-    const state = params.get("state");
 
-    if (code && state === "gmail_connect" && selectedCompany && user) {
+    if (code && selectedCompany && user) {
       window.history.replaceState({}, "", window.location.pathname);
       handleCallback(code);
     }
@@ -86,21 +85,19 @@ const GmailConnectionCard = () => {
     if (!clientId) {
       toast({
         title: "Configuração em falta",
-        description: "GOOGLE_CLIENT_ID não está configurado.",
+        description: "NYLAS_CLIENT_ID não está configurado.",
         variant: "destructive",
       });
       return;
     }
     const redirectUri = `${window.location.origin}/settings`;
-    const scope = "https://www.googleapis.com/auth/gmail.readonly";
-    const url = new URL("https://accounts.google.com/o/oauth2/v2/auth");
+    // Nylas Hosted Auth URL
+    const url = new URL("https://api.us.nylas.com/v3/connect/auth");
     url.searchParams.set("client_id", clientId);
     url.searchParams.set("redirect_uri", redirectUri);
     url.searchParams.set("response_type", "code");
-    url.searchParams.set("scope", scope);
     url.searchParams.set("access_type", "offline");
-    url.searchParams.set("prompt", "consent");
-    url.searchParams.set("state", "gmail_connect");
+    url.searchParams.set("provider", "google");
     window.location.href = url.toString();
   };
 

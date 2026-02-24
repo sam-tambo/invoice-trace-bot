@@ -6,75 +6,40 @@ const corsHeaders = {
     "authorization, x-client-info, apikey, content-type",
 };
 
-async function refreshAccessToken(
-  refreshToken: string,
-  clientId: string,
-  clientSecret: string
-): Promise<{ access_token: string; expires_in: number } | null> {
-  const res = await fetch("https://oauth2.googleapis.com/token", {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({
-      refresh_token: refreshToken,
-      client_id: clientId,
-      client_secret: clientSecret,
-      grant_type: "refresh_token",
-    }),
+const NYLAS_BASE = "https://api.us.nylas.com/v3";
+
+async function searchNylasMessages(apiKey: string, grantId: string, query: string): Promise<any[]> {
+  const url = `${NYLAS_BASE}/grants/${grantId}/messages?q=${encodeURIComponent(query)}&has_attachments=true&limit=10`;
+  const res = await fetch(url, {
+    headers: { Authorization: `Bearer ${apiKey}`, Accept: "application/json" },
   });
-  const data = await res.json();
-  if (data.error) return null;
-  return { access_token: data.access_token, expires_in: data.expires_in };
-}
-
-async function searchGmail(accessToken: string, query: string): Promise<any[]> {
-  const res = await fetch(
-    `https://gmail.googleapis.com/gmail/v1/users/me/messages?q=${encodeURIComponent(query)}&maxResults=10`,
-    { headers: { Authorization: `Bearer ${accessToken}` } }
-  );
-  const data = await res.json();
-  return data.messages || [];
-}
-
-async function getMessageWithAttachments(accessToken: string, messageId: string) {
-  const res = await fetch(
-    `https://gmail.googleapis.com/gmail/v1/users/me/messages/${messageId}?format=full`,
-    { headers: { Authorization: `Bearer ${accessToken}` } }
-  );
-  return await res.json();
-}
-
-async function downloadAttachment(accessToken: string, messageId: string, attachmentId: string) {
-  const res = await fetch(
-    `https://gmail.googleapis.com/gmail/v1/users/me/messages/${messageId}/attachments/${attachmentId}`,
-    { headers: { Authorization: `Bearer ${accessToken}` } }
-  );
-  const data = await res.json();
-  return data.data; // base64url encoded
-}
-
-function base64UrlToBase64(b64url: string): string {
-  return b64url.replace(/-/g, "+").replace(/_/g, "/");
-}
-
-function findAttachmentParts(parts: any[]): any[] {
-  const results: any[] = [];
-  for (const part of parts) {
-    if (part.filename && part.body?.attachmentId) {
-      const mime = (part.mimeType || "").toLowerCase();
-      if (mime.includes("pdf") || mime.includes("image")) {
-        results.push({
-          filename: part.filename,
-          mimeType: part.mimeType,
-          attachmentId: part.body.attachmentId,
-          size: part.body.size || 0,
-        });
-      }
-    }
-    if (part.parts) {
-      results.push(...findAttachmentParts(part.parts));
-    }
+  if (!res.ok) {
+    console.error("Nylas search error:", res.status, await res.text());
+    return [];
   }
-  return results;
+  const data = await res.json();
+  return data.data || [];
+}
+
+async function getNylasMessage(apiKey: string, grantId: string, messageId: string): Promise<any> {
+  const url = `${NYLAS_BASE}/grants/${grantId}/messages/${messageId}`;
+  const res = await fetch(url, {
+    headers: { Authorization: `Bearer ${apiKey}`, Accept: "application/json" },
+  });
+  if (!res.ok) return null;
+  return (await res.json()).data;
+}
+
+async function downloadNylasAttachment(apiKey: string, grantId: string, attachmentId: string, messageId: string): Promise<ArrayBuffer | null> {
+  const url = `${NYLAS_BASE}/grants/${grantId}/attachments/${attachmentId}/download?message_id=${messageId}`;
+  const res = await fetch(url, {
+    headers: { Authorization: `Bearer ${apiKey}` },
+  });
+  if (!res.ok) {
+    console.error("Nylas download error:", res.status, await res.text());
+    return null;
+  }
+  return await res.arrayBuffer();
 }
 
 Deno.serve(async (req) => {
@@ -86,9 +51,8 @@ Deno.serve(async (req) => {
     const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
     const supabaseAnonKey = Deno.env.get("SUPABASE_ANON_KEY")!;
     const serviceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
-    const googleClientId = Deno.env.get("GOOGLE_CLIENT_ID")!;
-    const googleClientSecret = Deno.env.get("GOOGLE_CLIENT_SECRET")!;
-    const anthropicKey = Deno.env.get("ANTHROPIC_API_KEY");
+    const nylasApiKey = Deno.env.get("NYLAS_API_KEY")!;
+    const lovableApiKey = Deno.env.get("LOVABLE_API_KEY");
 
     // Auth
     const authHeader = req.headers.get("Authorization");
@@ -121,7 +85,7 @@ Deno.serve(async (req) => {
 
     const db = createClient(supabaseUrl, serviceKey);
 
-    // Get gmail connection
+    // Get gmail connection — grant_id is stored in access_token field
     const { data: conn } = await db
       .from("email_connections")
       .select("*")
@@ -129,35 +93,16 @@ Deno.serve(async (req) => {
       .eq("provider", "gmail")
       .maybeSingle();
 
-    if (!conn || !conn.refresh_token) {
+    if (!conn || !conn.access_token) {
       return new Response(
         JSON.stringify({ error: "Gmail não ligado. Ligue primeiro nas Definições." }),
         { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
       );
     }
 
-    // Refresh token if expired
-    let accessToken = conn.access_token;
-    const expiresAt = conn.token_expires_at ? new Date(conn.token_expires_at) : new Date(0);
-    if (expiresAt < new Date()) {
-      const refreshed = await refreshAccessToken(conn.refresh_token, googleClientId, googleClientSecret);
-      if (!refreshed) {
-        return new Response(
-          JSON.stringify({ error: "Falha ao refrescar token Gmail. Religue nas Definições." }),
-          { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-        );
-      }
-      accessToken = refreshed.access_token;
-      await db
-        .from("email_connections")
-        .update({
-          access_token: accessToken,
-          token_expires_at: new Date(Date.now() + refreshed.expires_in * 1000).toISOString(),
-        })
-        .eq("id", conn.id);
-    }
+    const grantId = conn.access_token; // grant_id stored here
 
-    // Get missing/contacted invoices with their suppliers
+    // Get missing/contacted invoices
     const { data: invoices } = await db
       .from("invoices")
       .select("id, invoice_number, supplier_nif, supplier_name, amount, supplier_id")
@@ -210,54 +155,52 @@ Deno.serve(async (req) => {
       } else if (supplier?.legal_name) {
         queryParts.push(supplier.legal_name);
       } else {
-        continue; // No way to search
+        continue;
       }
-      queryParts.push("has:attachment");
-      queryParts.push("(filename:pdf OR filename:jpg OR filename:png)");
 
       const query = queryParts.join(" ");
-      console.log(`Searching Gmail for NIF ${nif}: ${query}`);
+      console.log(`Searching Nylas for NIF ${nif}: ${query}`);
 
-      const messages = await searchGmail(accessToken!, query);
+      const messages = await searchNylasMessages(nylasApiKey, grantId, query);
       totalEmailsFound += messages.length;
 
       for (const msg of messages.slice(0, 5)) {
-        const fullMsg = await getMessageWithAttachments(accessToken!, msg.id);
-        const parts = fullMsg.payload?.parts || [];
-        const attachmentParts = findAttachmentParts(
-          fullMsg.payload?.parts ? parts : [fullMsg.payload]
-        );
+        // Get full message with attachments
+        const fullMsg = msg.attachments ? msg : await getNylasMessage(nylasApiKey, grantId, msg.id);
+        if (!fullMsg) continue;
 
-        for (const att of attachmentParts) {
-          if (!anthropicKey) continue;
+        const attachments = (fullMsg.attachments || []).filter((att: any) => {
+          const ct = (att.content_type || "").toLowerCase();
+          return ct.includes("pdf") || ct.includes("image");
+        });
 
-          const rawData = await downloadAttachment(accessToken!, msg.id, att.attachmentId);
-          if (!rawData) continue;
+        for (const att of attachments) {
+          if (!lovableApiKey) continue;
 
-          const b64Data = base64UrlToBase64(rawData);
+          const fileData = await downloadNylasAttachment(nylasApiKey, grantId, att.id, msg.id);
+          if (!fileData) continue;
 
-          // Parse with AI
+          const fileBuffer = new Uint8Array(fileData);
+          const b64Data = btoa(String.fromCharCode(...fileBuffer));
+
+          // Parse with Lovable AI (Gemini)
           try {
-            const aiRes = await fetch("https://api.anthropic.com/v1/messages", {
+            const aiRes = await fetch("https://api.lovable.dev/v1/chat/completions", {
               method: "POST",
               headers: {
-                "x-api-key": anthropicKey,
-                "anthropic-version": "2023-06-01",
+                Authorization: `Bearer ${lovableApiKey}`,
                 "Content-Type": "application/json",
               },
               body: JSON.stringify({
-                model: "claude-sonnet-4-20250514",
-                max_tokens: 1024,
+                model: "google/gemini-2.5-flash",
                 messages: [
                   {
                     role: "user",
                     content: [
                       {
-                        type: att.mimeType.includes("image") ? "image" : "document",
-                        source: {
-                          type: "base64",
-                          media_type: att.mimeType,
-                          data: b64Data,
+                        type: "image_url",
+                        image_url: {
+                          url: `data:${att.content_type};base64,${b64Data}`,
                         },
                       },
                       {
@@ -270,17 +213,20 @@ Deno.serve(async (req) => {
               }),
             });
 
-            if (!aiRes.ok) continue;
+            if (!aiRes.ok) {
+              console.error("AI parse error:", aiRes.status, await aiRes.text());
+              continue;
+            }
 
             const aiData = await aiRes.json();
-            const textContent = aiData.content?.find((c: any) => c.type === "text")?.text || "";
+            const textContent = aiData.choices?.[0]?.message?.content || "";
             const jsonMatch = textContent.match(/\{[\s\S]*\}/);
             if (!jsonMatch) continue;
 
             const parsed = JSON.parse(jsonMatch[0]);
             if (!parsed.is_invoice) continue;
 
-            // Try to match by invoice number first, then by amount
+            // Try to match
             let matchedInvoice = nifInvoices.find(
               (inv) => parsed.invoice_number && inv.invoice_number === parsed.invoice_number
             );
@@ -290,16 +236,14 @@ Deno.serve(async (req) => {
               );
             }
             if (!matchedInvoice) {
-              matchedInvoice = nifInvoices[0]; // fallback: first missing invoice for this supplier
+              matchedInvoice = nifInvoices[0];
             }
 
             if (matchedInvoice) {
               // Upload to storage
               const filePath = `${company_id}/${nif}/${Date.now()}_${att.filename}`;
-              const fileBuffer = Uint8Array.from(atob(b64Data), (c) => c.charCodeAt(0));
-
               await db.storage.from("invoice-files").upload(filePath, fileBuffer, {
-                contentType: att.mimeType,
+                contentType: att.content_type,
                 upsert: false,
               });
 
@@ -322,8 +266,8 @@ Deno.serve(async (req) => {
                 invoice_id: matchedInvoice.id,
                 file_name: att.filename,
                 file_path: filePath,
-                file_type: att.mimeType,
-                file_size: att.size,
+                file_type: att.content_type,
+                file_size: att.size || fileBuffer.length,
                 uploaded_by: "00000000-0000-0000-0000-000000000000",
               });
 
@@ -334,7 +278,6 @@ Deno.serve(async (req) => {
                 filename: att.filename,
               });
 
-              // Remove from pending list
               const idx = nifInvoices.indexOf(matchedInvoice);
               if (idx > -1) nifInvoices.splice(idx, 1);
             }
