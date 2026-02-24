@@ -80,27 +80,28 @@ const GmailConnectionCard = () => {
   const handleCallback = async (code: string) => {
     if (!selectedCompany) return;
     setConnecting(true);
-    try {
-    // Use the saved redirect_uri to ensure it matches what was used in connectGmail
-    const redirectUri = sessionStorage.getItem(GMAIL_REDIRECT_URI_KEY) || `${window.location.origin}/settings`;
-    console.log("Exchanging Gmail code with redirect_uri:", redirectUri);
 
+    // Clear saved data IMMEDIATELY to prevent double-processing on remount
+    const redirectUri = sessionStorage.getItem(GMAIL_REDIRECT_URI_KEY) || `${window.location.origin}/settings`;
+    sessionStorage.removeItem(GMAIL_CODE_KEY);
+    sessionStorage.removeItem(GMAIL_REDIRECT_URI_KEY);
+
+    console.log("Exchanging Gmail code with redirect_uri:", redirectUri, "company:", selectedCompany.id);
+
+    try {
       const { data, error } = await supabase.functions.invoke("gmail-auth-callback", {
         body: { code, redirect_uri: redirectUri, company_id: selectedCompany.id },
       });
 
+      console.log("Gmail callback response:", { data, error });
+
       if (error) throw error;
       if (data?.error) throw new Error(data.error);
 
-      // Clear saved data on success
-      sessionStorage.removeItem(GMAIL_CODE_KEY);
-      sessionStorage.removeItem(GMAIL_REDIRECT_URI_KEY);
       toast({ title: "Gmail ligado!", description: `Conta: ${data.email_address}` });
       fetchConnection();
     } catch (err: any) {
       console.error("Gmail callback error:", err);
-      sessionStorage.removeItem(GMAIL_CODE_KEY);
-      sessionStorage.removeItem(GMAIL_REDIRECT_URI_KEY);
       toast({ title: "Erro ao ligar Gmail", description: err.message, variant: "destructive" });
     } finally {
       setConnecting(false);
