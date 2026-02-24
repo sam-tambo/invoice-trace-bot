@@ -8,8 +8,8 @@ const corsHeaders = {
 
 const NYLAS_BASE = "https://api.us.nylas.com/v3";
 
-async function searchNylasMessages(apiKey: string, grantId: string, query: string): Promise<any[]> {
-  const url = `${NYLAS_BASE}/grants/${grantId}/messages?q=${encodeURIComponent(query)}&has_attachments=true&limit=10`;
+async function searchNylasMessages(apiKey: string, grantId: string, query: string, requireAttachments = false): Promise<any[]> {
+  const url = `${NYLAS_BASE}/grants/${grantId}/messages?q=${encodeURIComponent(query)}${requireAttachments ? '&has_attachments=true' : ''}&limit=15`;
   const res = await fetch(url, {
     headers: { Authorization: `Bearer ${apiKey}`, Accept: "application/json" },
   });
@@ -147,17 +147,25 @@ Deno.serve(async (req) => {
       const supplier = supplierMap.get(nif);
 
       // Build search query
+      // Build search query — include invoice numbers + broader terms
       const queryParts: string[] = [];
       if (supplier?.email) {
         queryParts.push(`from:${supplier.email}`);
-      } else if (supplier?.name) {
-        queryParts.push(supplier.name);
-      } else if (supplier?.legal_name) {
-        queryParts.push(supplier.legal_name);
-      } else {
-        continue;
       }
+      // Add supplier name for broader matching
+      const supplierName = supplier?.name || supplier?.legal_name;
+      if (supplierName && !supplier?.email) {
+        queryParts.push(supplierName);
+      }
+      // Add invoice numbers to search body text
+      const invoiceNumbers = nifInvoices.map(i => i.invoice_number).filter(Boolean);
+      if (invoiceNumbers.length > 0) {
+        queryParts.push(`{${invoiceNumbers.join(" ")}}`);
+      }
+      // Add common invoice terms
+      queryParts.push("fatura OR invoice OR factura OR recibo");
 
+      if (queryParts.length === 0) continue;
       const query = queryParts.join(" ");
       console.log(`Searching Nylas for NIF ${nif}: ${query}`);
 
@@ -185,7 +193,7 @@ Deno.serve(async (req) => {
 
           // Parse with Lovable AI (Gemini)
           try {
-            const aiRes = await fetch("https://api.lovable.dev/v1/chat/completions", {
+            const aiRes = await fetch("https://ai.gateway.lovable.dev/v1/chat/completions", {
               method: "POST",
               headers: {
                 Authorization: `Bearer ${lovableApiKey}`,
