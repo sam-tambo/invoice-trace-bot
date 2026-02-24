@@ -1,64 +1,48 @@
 
 
-## Diagnosis: Why Gmail Connection Keeps Failing Silently
+## Thorough Diagnosis: Three Critical Bugs Found
 
-### Root Cause Found
+### Bug 1: Missing `code_verifier: "nylas"` in token exchange (PRIMARY CAUSE)
 
-I checked the edge function logs and found **zero POST requests** to `gmail-auth-callback` -- only GETs (fetching the client ID). The code exchange POST is never reaching the function.
+The Nylas documentation for API key authentication **explicitly requires** `"code_verifier": "nylas"` in the POST to `/v3/connect/token`. The current edge function does NOT send this field. From the docs:
 
-**Primary Issue: Incomplete CORS headers** in `gmail-auth-callback/index.ts`.
-
-The function currently allows:
-```
-authorization, x-client-info, apikey, content-type
-```
-
-But `supabase.functions.invoke()` sends additional headers that the browser's CORS preflight check rejects:
-```
-x-supabase-client-platform, x-supabase-client-platform-version, 
-x-supabase-client-runtime, x-supabase-client-runtime-version
-```
-
-When the preflight OPTIONS request fails, the browser silently blocks the POST. The code is captured from the URL, but the exchange call never reaches the server. No error is shown because the CORS failure happens at browser level before the fetch completes.
-
-**Secondary Issue: Redirect URI mismatch risk.** If the user initiates from the preview domain but Nylas redirects to a different domain, the `redirect_uri` sent during code exchange won't match the one used during the initial auth request, causing Nylas to reject it.
-
-### Fixes Required
-
-**1. Fix CORS headers in `gmail-auth-callback/index.ts`**
-
-Update the `corsHeaders` to include all headers sent by the Supabase JS client:
-
-```javascript
-const corsHeaders = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Headers":
-    "authorization, x-client-info, apikey, content-type, x-supabase-client-platform, x-supabase-client-platform-version, x-supabase-client-runtime, x-supabase-client-runtime-version",
-};
+```text
+POST /v3/connect/token
+{
+  "client_id": "<NYLAS_CLIENT_ID>",
+  "client_secret": "<NYLAS_API_KEY>",
+  "grant_type": "authorization_code",
+  "code": "<CODE>",
+  "redirect_uri": "<CALLBACK_URI>",
+  "code_verifier": "nylas"        <-- MISSING from our code
+}
 ```
 
-**2. Add better error handling in `GmailConnectionCard.tsx`**
+Without this, Nylas rejects the code exchange, returning "Given 'code' not valid or expired". The code IS reaching the function (confirmed via curl), but the Nylas API rejects it.
 
-The `handleCallback` function catches errors but a CORS failure might not produce a meaningful message. Add explicit logging and handle network-level failures:
+**File:** `supabase/functions/gmail-auth-callback/index.ts` line 64-70 -- add `code_verifier: "nylas"` to the body.
 
-```typescript
-const { data, error } = await supabase.functions.invoke("gmail-auth-callback", {
-  body: { code, redirect_uri: redirectUri, company_id: selectedCompany.id },
-});
-console.log("Gmail callback response:", { data, error });
-```
+### Bug 2: `scan-gmail-invoices` uses non-existent `getClaims()` method
 
-**3. Fix redirect URI consistency**
+Line 70 of `scan-gmail-invoices/index.ts` calls `supabase.auth.getClaims(token)` which does not exist in this environment. This means even if Gmail connects, scanning will immediately fail with an auth error. Must be replaced with `supabase.auth.getUser()`.
 
-Store the exact `redirect_uri` used during `connectGmail` in `sessionStorage` alongside the code, so that `handleCallback` uses the exact same URI for the exchange -- regardless of which domain the redirect lands on.
+### Bug 3: `scan-gmail-invoices` has incomplete CORS headers
 
-**4. Redeploy and test**
-
-After fixing, deploy the edge function and test the full flow end-to-end by calling the function directly to verify it responds to POST requests.
+Line 7 of `scan-gmail-invoices/index.ts` only allows `authorization, x-client-info, apikey, content-type` -- missing the `x-supabase-client-platform*` headers. Same CORS bug that was already fixed in `gmail-auth-callback`.
 
 ### Implementation Steps
-1. Fix CORS headers in `gmail-auth-callback/index.ts`
-2. Update `GmailConnectionCard.tsx` to persist and reuse the exact redirect_uri
-3. Add better error logging in the callback handler
-4. Deploy and test the edge function with a direct POST call
+
+1. **`supabase/functions/gmail-auth-callback/index.ts`**: Add `code_verifier: "nylas"` to the token exchange body (1 line change)
+
+2. **`supabase/functions/scan-gmail-invoices/index.ts`**: 
+   - Fix CORS headers to include all supabase client headers
+   - Replace `getClaims(token)` with `getUser()` and adjust the user ID extraction
+
+3. **Deploy both functions** and test the POST exchange with curl to verify it works
+
+4. **Test end-to-end** on the published app
+
+### Technical Details
+
+The `code_verifier` field is part of PKCE (Proof Key for Code Exchange). Nylas uses a static value `"nylas"` as the verifier for their hosted OAuth flow with API key authentication. Without it, Nylas cannot verify the code exchange request is legitimate and rejects it outright. This single missing field is why every connection attempt has failed silently -- the code reaches the function, Nylas rejects the exchange, the error is returned but potentially swallowed by the frontend error handling.
 
