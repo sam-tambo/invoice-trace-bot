@@ -130,6 +130,8 @@ const GmailConnectionCard = () => {
     url.searchParams.set("response_type", "code");
     url.searchParams.set("access_type", "offline");
     url.searchParams.set("provider", "google");
+    url.searchParams.set("code_challenge", "nylas");
+    url.searchParams.set("code_challenge_method", "plain");
 
     // If inside an iframe (Lovable preview), open in new tab instead of breaking the editor
     const isInIframe = window.self !== window.top;
