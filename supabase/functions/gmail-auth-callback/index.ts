@@ -11,21 +11,21 @@ Deno.serve(async (req) => {
     return new Response(null, { headers: corsHeaders });
   }
 
-  // GET: return the Google Client ID (public info)
+  // GET: return Nylas Client ID + auth URL info
   if (req.method === "GET") {
-    const clientId = Deno.env.get("GOOGLE_CLIENT_ID") || "";
+    const clientId = Deno.env.get("NYLAS_CLIENT_ID") || "";
     return new Response(
       JSON.stringify({ client_id: clientId }),
       { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } }
     );
   }
 
-  // POST: handle OAuth callback
+  // POST: exchange Nylas auth code for grant_id
   try {
     const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
     const supabaseAnonKey = Deno.env.get("SUPABASE_ANON_KEY")!;
-    const googleClientId = Deno.env.get("GOOGLE_CLIENT_ID")!;
-    const googleClientSecret = Deno.env.get("GOOGLE_CLIENT_SECRET")!;
+    const nylasApiKey = Deno.env.get("NYLAS_API_KEY")!;
+    const nylasClientId = Deno.env.get("NYLAS_CLIENT_ID")!;
 
     const authHeader = req.headers.get("Authorization");
     if (!authHeader?.startsWith("Bearer ")) {
@@ -38,7 +38,6 @@ Deno.serve(async (req) => {
     const supabase = createClient(supabaseUrl, supabaseAnonKey, {
       global: { headers: { Authorization: authHeader } },
     });
-
     const token = authHeader.replace("Bearer ", "");
     const { data: claimsData, error: claimsError } = await supabase.auth.getClaims(token);
     if (claimsError || !claimsData?.claims) {
@@ -58,40 +57,34 @@ Deno.serve(async (req) => {
       );
     }
 
-    // Exchange code for tokens
-    const tokenRes = await fetch("https://oauth2.googleapis.com/token", {
+    // Exchange Nylas auth code for tokens + grant_id
+    const tokenRes = await fetch("https://api.us.nylas.com/v3/connect/token", {
       method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: new URLSearchParams({
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
         code,
-        client_id: googleClientId,
-        client_secret: googleClientSecret,
+        client_id: nylasClientId,
+        client_secret: nylasApiKey,
         redirect_uri,
         grant_type: "authorization_code",
       }),
     });
 
     const tokenData = await tokenRes.json();
-    if (tokenData.error) {
-      console.error("Google token error:", tokenData);
+    if (tokenData.error || !tokenData.grant_id) {
+      console.error("Nylas token exchange error:", tokenData);
       return new Response(
-        JSON.stringify({ error: tokenData.error_description || tokenData.error }),
+        JSON.stringify({ error: tokenData.error_description || tokenData.error || "Failed to exchange code" }),
         { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
       );
     }
 
-    const { access_token, refresh_token, expires_in } = tokenData;
-    const tokenExpiresAt = new Date(Date.now() + expires_in * 1000).toISOString();
+    const { grant_id, email, access_token, refresh_token, expires_in } = tokenData;
+    const tokenExpiresAt = expires_in
+      ? new Date(Date.now() + expires_in * 1000).toISOString()
+      : null;
 
-    // Get user's email from Gmail profile
-    const profileRes = await fetch(
-      "https://gmail.googleapis.com/gmail/v1/users/me/profile",
-      { headers: { Authorization: `Bearer ${access_token}` } }
-    );
-    const profile = await profileRes.json();
-    const emailAddress = profile.emailAddress || null;
-
-    // Upsert email_connection
+    // Upsert email_connection — store grant_id in refresh_token field for reuse
     const serviceDb = createClient(supabaseUrl, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!);
 
     const { data: existing } = await serviceDb
@@ -101,31 +94,29 @@ Deno.serve(async (req) => {
       .eq("provider", "gmail")
       .maybeSingle();
 
+    const connectionData = {
+      user_id: userId,
+      access_token: grant_id, // Store grant_id as primary identifier
+      refresh_token: refresh_token || null,
+      token_expires_at: tokenExpiresAt,
+      email_address: email || null,
+    };
+
     if (existing) {
       await serviceDb
         .from("email_connections")
-        .update({
-          user_id: userId,
-          access_token,
-          refresh_token: refresh_token || undefined,
-          token_expires_at: tokenExpiresAt,
-          email_address: emailAddress,
-        })
+        .update(connectionData)
         .eq("id", existing.id);
     } else {
       await serviceDb.from("email_connections").insert({
         company_id,
-        user_id: userId,
         provider: "gmail",
-        access_token,
-        refresh_token,
-        token_expires_at: tokenExpiresAt,
-        email_address: emailAddress,
+        ...connectionData,
       });
     }
 
     return new Response(
-      JSON.stringify({ success: true, email_address: emailAddress }),
+      JSON.stringify({ success: true, email_address: email, grant_id }),
       { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } }
     );
   } catch (err) {
