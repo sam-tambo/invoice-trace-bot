@@ -1,133 +1,72 @@
 
 
-# Gmail Integration -- Auto-find and Link Missing Invoices
+## Integrar Nylas para Acesso ao Gmail
 
-## Overview
-Allow users to connect their Gmail account via Google OAuth. The system will then search their inbox for emails from suppliers with missing invoices, download PDF/image attachments, parse them with AI, and automatically link them to the correct missing invoice record.
+### Resumo
+Substituir o fluxo OAuth custom do Google pelo Nylas API v3 para pesquisar emails e descarregar faturas. O Nylas ja tem as credenciais Google configuradas (como mostrado no screenshot), pelo que so precisamos da API Key e do Grant ID para aceder ao email dos utilizadores.
 
-## How It Works (User Flow)
-1. In Settings, click "Ligar Gmail"
-2. Google login screen appears -- user grants read-only email access
-3. Back in the app, Gmail shows as connected
-4. On the Invoices page, click "Procurar no Gmail" 
-5. The system searches the user's inbox for emails from suppliers who have missing invoices, downloads attachments, parses them, and updates matched invoices to "received"
+### Vantagens
+- Elimina o problema do erro 403 do Google OAuth
+- Nao e preciso gerir tokens OAuth manualmente (o Nylas trata disso)
+- API mais simples e direta para pesquisar emails e descarregar anexos
 
-## Prerequisites -- Secrets Needed
-- **GOOGLE_CLIENT_ID** -- from Google Cloud Console OAuth credentials
-- **GOOGLE_CLIENT_SECRET** -- from Google Cloud Console OAuth credentials
+### O que muda
 
-The user must create a Google Cloud project with Gmail API enabled and configure OAuth consent screen with the `gmail.readonly` scope.
+**1. Segredos necessarios**
+- `NYLAS_API_KEY` -- a API key da tua conta Nylas
+- `NYLAS_GRANT_ID` -- o Grant ID do utilizador/conta Google ligada no Nylas
 
-## Changes
+**2. Edge function: `scan-gmail-invoices`** (reescrita)
+- Usa a Nylas Messages API em vez da Gmail API direta
+- Endpoints:
+  - `GET https://api.us.nylas.com/v3/grants/{grant_id}/messages?q=...&has_attachments=true` para pesquisar emails
+  - `GET https://api.us.nylas.com/v3/grants/{grant_id}/messages/{id}?select=attachments` para obter detalhes
+  - `GET https://api.us.nylas.com/v3/grants/{grant_id}/attachments/{id}/download?message_id=...` para descarregar anexos
+- Autenticacao: header `Authorization: Bearer {NYLAS_API_KEY}`
+- A logica de matching com faturas e upload para storage mantém-se igual
 
-### 1. New Database Table: `email_connections`
-Stores OAuth refresh tokens per company so the system can access Gmail on behalf of the user.
+**3. Edge function: `gmail-auth-callback`** (removida ou simplificada)
+- Ja nao e necessaria -- a autenticacao e gerida pelo Nylas dashboard
+- Sera removida ou convertida num endpoint simples que verifica se o Nylas esta configurado
 
-Columns:
-- `id` (uuid, PK)
-- `company_id` (uuid, NOT NULL) -- which company this connection belongs to
-- `user_id` (uuid, NOT NULL) -- which user authorized it
-- `provider` (text, default `'gmail'`) -- for future extensibility (Outlook, etc.)
-- `email_address` (text) -- the connected email address
-- `access_token` (text) -- short-lived token
-- `refresh_token` (text) -- long-lived token for refreshing
-- `token_expires_at` (timestamptz) -- when access_token expires
-- `created_at`, `updated_at` (timestamptz)
+**4. Componente `GmailConnectionCard`** (simplificado)
+- Remove todo o fluxo OAuth (redirect para Google, callback com code)
+- Mostra apenas o estado da ligacao (configurado/nao configurado) baseado na existencia dos segredos
+- Pode opcionalmente guardar o grant_id na tabela `email_connections` para suporte futuro de multiplos utilizadores
 
-RLS: company members can SELECT; only the authorizing user can INSERT; members can UPDATE (for token refresh); members can DELETE (disconnect).
+**5. Componente `ScanGmailDialog`** 
+- Sem alteracoes significativas -- continua a chamar a edge function `scan-gmail-invoices`
 
-### 2. New Edge Function: `gmail-auth-callback`
-Handles the OAuth callback from Google:
-- Receives the authorization `code` from the frontend redirect
-- Exchanges it for access_token + refresh_token via Google's token endpoint
-- Fetches the user's email address from Gmail profile
-- Stores tokens in `email_connections` table
-- Returns success with the connected email address
+### Secção Tecnica
 
-### 3. New Edge Function: `scan-gmail-invoices`
-The core logic -- searches Gmail and matches invoices:
-- Authenticates user, verifies company membership
-- Loads all missing/contacted invoices for the company
-- Gets the Gmail connection tokens (refreshes if expired)
-- For each supplier with missing invoices, builds a Gmail search query: `from:{supplier_email} has:attachment (filename:pdf OR filename:jpg OR filename:png)`
-- Also searches by supplier name or NIF if no email is known
-- Downloads PDF/image attachments from matching emails
-- Sends attachments to AI (same Claude parsing logic as `receive-email`) to extract invoice data
-- Matches parsed invoice numbers/amounts against missing invoices
-- Updates matched invoices to "received" status and saves attachments
-- Returns a summary of what was found and matched
-
-### 4. UI: Settings Page -- Connect Gmail Section
-Add a new card to Settings with:
-- "Ligar Gmail" button (starts OAuth flow)
-- When connected: shows the connected email address and a "Desligar" button
-- Status indicator (connected/not connected)
-
-The OAuth flow:
-- Frontend opens a popup/redirect to Google's OAuth URL with `gmail.readonly` scope
-- Redirect URI points to the app (e.g., `/settings?gmail_callback=true`)
-- Frontend captures the `code` parameter and sends it to `gmail-auth-callback` edge function
-
-### 5. UI: Invoices Page -- Scan Gmail Button
-Add a "Procurar no Gmail" button next to existing action buttons:
-- Only visible when Gmail is connected
-- Shows a progress dialog while scanning
-- Displays results: X emails found, Y invoices matched, Z attachments downloaded
-
-### 6. Config Updates
 ```text
-supabase/config.toml additions:
+Antes (OAuth custom):
+  Browser --> Google OAuth --> callback --> gmail-auth-callback (troca code por tokens)
+  scan-gmail-invoices --> refresh token --> Gmail API
 
-[functions.gmail-auth-callback]
-verify_jwt = false
-
-[functions.scan-gmail-invoices]
-verify_jwt = false
+Depois (Nylas):
+  scan-gmail-invoices --> Nylas API (com API Key + Grant ID)
+  (sem fluxo OAuth no browser)
 ```
 
-## Technical Details
+**Nylas API calls no edge function:**
+```
+GET /v3/grants/{grant_id}/messages
+  ?q=from:supplier@email.com has:attachment
+  &limit=10
+  Headers: Authorization: Bearer {NYLAS_API_KEY}
 
-### Google OAuth Flow
-```text
-1. Frontend builds URL:
-   https://accounts.google.com/o/oauth2/v2/auth
-   ?client_id={GOOGLE_CLIENT_ID}
-   &redirect_uri={APP_URL}/settings
-   &response_type=code
-   &scope=https://www.googleapis.com/auth/gmail.readonly
-   &access_type=offline
-   &prompt=consent
-
-2. User authorizes, Google redirects back with ?code=...
-
-3. Frontend sends code to gmail-auth-callback edge function
-
-4. Edge function exchanges code for tokens:
-   POST https://oauth2.googleapis.com/token
-   client_id, client_secret, code, redirect_uri, grant_type=authorization_code
+GET /v3/grants/{grant_id}/attachments/{att_id}/download
+  ?message_id={msg_id}
+  Headers: Authorization: Bearer {NYLAS_API_KEY}
 ```
 
-### Gmail API Search (in scan function)
-```text
-GET https://gmail.googleapis.com/gmail/v1/users/me/messages
-  ?q=from:supplier@example.com has:attachment filename:pdf
+**Parsing AI:** mantém-se com Lovable AI (modelo suportado) em vez do Anthropic direto, eliminando a dependencia do `ANTHROPIC_API_KEY`.
 
-GET https://gmail.googleapis.com/gmail/v1/users/me/messages/{id}
-  ?format=full  (to get attachment metadata)
-
-GET https://gmail.googleapis.com/gmail/v1/users/me/messages/{id}/attachments/{attachmentId}
-  (to download attachment data as base64)
-```
-
-### Token Refresh (automatic)
-When access_token expires, the edge function uses the refresh_token:
-```text
-POST https://oauth2.googleapis.com/token
-  client_id, client_secret, refresh_token, grant_type=refresh_token
-```
-
-### File Summary
-- **New files**: `supabase/functions/gmail-auth-callback/index.ts`, `supabase/functions/scan-gmail-invoices/index.ts`, `src/components/GmailConnectionCard.tsx`, `src/components/ScanGmailDialog.tsx`
-- **Modified files**: `src/pages/Settings.tsx` (add Gmail card), `src/pages/Invoices.tsx` (add scan button)
-- **New migration**: create `email_connections` table with RLS
+### Passos de implementacao
+1. Pedir os segredos `NYLAS_API_KEY` e `NYLAS_GRANT_ID`
+2. Reescrever `scan-gmail-invoices` para usar Nylas API
+3. Simplificar `GmailConnectionCard` (remover OAuth flow)
+4. Remover/simplificar `gmail-auth-callback`
+5. Testar o fluxo completo
 
