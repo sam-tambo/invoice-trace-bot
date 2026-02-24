@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
 import { supabase } from "@/integrations/supabase/client";
 import { useCompany } from "@/hooks/useCompany";
 import { useAuth } from "@/hooks/useAuth";
@@ -6,6 +6,8 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { useToast } from "@/hooks/use-toast";
 import { Mail, Link2, Unlink, Loader2 } from "lucide-react";
+
+const GMAIL_CODE_KEY = "gmail_oauth_code";
 
 const GmailConnectionCard = () => {
   const { selectedCompany } = useCompany();
@@ -15,6 +17,7 @@ const GmailConnectionCard = () => {
   const [loading, setLoading] = useState(true);
   const [connecting, setConnecting] = useState(false);
   const [clientId, setClientId] = useState("");
+  const callbackProcessed = useRef(false);
 
   const fetchConnection = useCallback(async () => {
     if (!selectedCompany) return;
@@ -51,14 +54,25 @@ const GmailConnectionCard = () => {
     fetchConnection();
   }, [fetchConnection]);
 
-  // Handle Nylas OAuth callback
+  // Save code from URL to sessionStorage immediately (before any redirect can strip it)
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const code = params.get("code");
-
-    if (code && selectedCompany && user) {
+    if (code) {
+      console.log("Gmail OAuth code detected in URL, saving to sessionStorage");
+      sessionStorage.setItem(GMAIL_CODE_KEY, code);
+      // Clean URL immediately
       window.history.replaceState({}, "", window.location.pathname);
-      handleCallback(code);
+    }
+  }, []);
+
+  // Process saved code once user and company are ready
+  useEffect(() => {
+    const savedCode = sessionStorage.getItem(GMAIL_CODE_KEY);
+    if (savedCode && selectedCompany && user && !callbackProcessed.current) {
+      callbackProcessed.current = true;
+      console.log("Processing saved Gmail OAuth code for company:", selectedCompany.id);
+      handleCallback(savedCode);
     }
   }, [selectedCompany, user]);
 
@@ -66,15 +80,24 @@ const GmailConnectionCard = () => {
     if (!selectedCompany) return;
     setConnecting(true);
     try {
+      // Use the current origin for redirect_uri — must match what was used in connectGmail
       const redirectUri = `${window.location.origin}/settings`;
+      console.log("Exchanging Gmail code with redirect_uri:", redirectUri);
+
       const { data, error } = await supabase.functions.invoke("gmail-auth-callback", {
         body: { code, redirect_uri: redirectUri, company_id: selectedCompany.id },
       });
+
       if (error) throw error;
       if (data?.error) throw new Error(data.error);
+
+      // Clear saved code on success
+      sessionStorage.removeItem(GMAIL_CODE_KEY);
       toast({ title: "Gmail ligado!", description: `Conta: ${data.email_address}` });
       fetchConnection();
     } catch (err: any) {
+      console.error("Gmail callback error:", err);
+      sessionStorage.removeItem(GMAIL_CODE_KEY);
       toast({ title: "Erro ao ligar Gmail", description: err.message, variant: "destructive" });
     } finally {
       setConnecting(false);
@@ -90,9 +113,10 @@ const GmailConnectionCard = () => {
       });
       return;
     }
-    // Use the published URL for redirects so Nylas doesn't get blocked by iframe
-    const publishedOrigin = "https://invoice-trace-bot.lovable.app";
-    const redirectUri = `${publishedOrigin}/settings`;
+
+    // Use current origin — the redirect must come back to THIS domain
+    const redirectUri = `${window.location.origin}/settings`;
+    
     // Nylas Hosted Auth URL
     const url = new URL("https://api.us.nylas.com/v3/connect/auth");
     url.searchParams.set("client_id", clientId);
@@ -100,9 +124,15 @@ const GmailConnectionCard = () => {
     url.searchParams.set("response_type", "code");
     url.searchParams.set("access_type", "offline");
     url.searchParams.set("provider", "google");
-    // Open in top-level window to avoid iframe restrictions
-    if (window.top) {
-      window.top.location.href = url.toString();
+
+    // If inside an iframe (Lovable preview), open in new tab instead of breaking the editor
+    const isInIframe = window.self !== window.top;
+    if (isInIframe) {
+      window.open(url.toString(), "_blank");
+      toast({
+        title: "Gmail a abrir...",
+        description: "Autentica no separador que abriu. Depois volta aqui e recarrega a página.",
+      });
     } else {
       window.location.href = url.toString();
     }
