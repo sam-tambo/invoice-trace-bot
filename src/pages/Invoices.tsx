@@ -21,7 +21,9 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Button } from "@/components/ui/button";
-import { Search, Filter, Eye, Send } from "lucide-react";
+import { Search, Filter, Eye, Send, UserSearch, Loader2 } from "lucide-react";
+import { useToast } from "@/hooks/use-toast";
+import { Progress } from "@/components/ui/progress";
 import { format } from "date-fns";
 import { pt } from "date-fns/locale";
 import { cn } from "@/lib/utils";
@@ -53,6 +55,9 @@ const Invoices = () => {
   const [selectedInvoice, setSelectedInvoice] = useState<Invoice | null>(null);
   const [bulkOpen, setBulkOpen] = useState(false);
   const [suppliersWithEmail, setSuppliersWithEmail] = useState(0);
+  const [lookupRunning, setLookupRunning] = useState(false);
+  const [lookupProgress, setLookupProgress] = useState({ done: 0, total: 0 });
+  const { toast } = useToast();
 
   const fetchInvoices = async () => {
     if (!selectedCompany) return;
@@ -74,6 +79,53 @@ const Invoices = () => {
       .eq("company_id", selectedCompany.id)
       .not("email", "is", null);
     setSuppliersWithEmail(count || 0);
+  };
+
+  const bulkLookupSuppliers = async () => {
+    if (!selectedCompany) return;
+    // Find unique NIFs with no supplier_name
+    const missingNifs = [...new Set(
+      invoices.filter((inv) => !inv.supplier_name || inv.supplier_name === "").map((inv) => inv.supplier_nif)
+    )].filter(Boolean);
+
+    if (missingNifs.length === 0) {
+      toast({ title: "Todos os fornecedores já têm nome." });
+      return;
+    }
+
+    setLookupRunning(true);
+    setLookupProgress({ done: 0, total: missingNifs.length });
+
+    let successCount = 0;
+    for (let i = 0; i < missingNifs.length; i++) {
+      try {
+        const { data, error } = await supabase.functions.invoke("nif-lookup", {
+          body: { nif: missingNifs[i], company_id: selectedCompany.id },
+        });
+        if (data?.success && data.supplier) {
+          // Update invoice supplier_name + supplier_id locally
+          const supplierName = data.supplier.name || data.supplier.legal_name || "";
+          if (supplierName) {
+            await supabase
+              .from("invoices")
+              .update({ supplier_name: supplierName, supplier_id: data.supplier.id })
+              .eq("company_id", selectedCompany.id)
+              .eq("supplier_nif", missingNifs[i]);
+            successCount++;
+          }
+        }
+      } catch (e) {
+        console.error(`Lookup failed for ${missingNifs[i]}:`, e);
+      }
+      setLookupProgress({ done: i + 1, total: missingNifs.length });
+    }
+
+    setLookupRunning(false);
+    toast({
+      title: `Lookup concluído`,
+      description: `${successCount} de ${missingNifs.length} fornecedores encontrados.`,
+    });
+    fetchInvoices();
   };
 
   useEffect(() => {
@@ -106,10 +158,21 @@ const Invoices = () => {
           <h1 className="text-2xl font-bold">Faturas</h1>
           <p className="text-muted-foreground">Rastreie e acompanhe faturas em falta.</p>
         </div>
-        <Button onClick={() => setBulkOpen(true)} className="gap-2">
-          <Send className="h-4 w-4" />
-          Pedir Todas em Falta
-        </Button>
+        <div className="flex gap-2">
+          <Button
+            variant="outline"
+            onClick={bulkLookupSuppliers}
+            disabled={lookupRunning}
+            className="gap-2"
+          >
+            {lookupRunning ? <Loader2 className="h-4 w-4 animate-spin" /> : <UserSearch className="h-4 w-4" />}
+            {lookupRunning ? `A procurar (${lookupProgress.done}/${lookupProgress.total})` : "Procurar Fornecedores"}
+          </Button>
+          <Button onClick={() => setBulkOpen(true)} className="gap-2">
+            <Send className="h-4 w-4" />
+            Pedir Todas em Falta
+          </Button>
+        </div>
       </div>
 
       {/* Filters */}
