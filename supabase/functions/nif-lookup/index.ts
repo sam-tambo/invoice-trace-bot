@@ -16,7 +16,7 @@ serve(async (req) => {
     const FIRECRAWL_API_KEY = Deno.env.get("FIRECRAWL_API_KEY");
     if (!FIRECRAWL_API_KEY) {
       return new Response(
-        JSON.stringify({ error: "Firecrawl connector not configured. Please connect Firecrawl in Settings." }),
+        JSON.stringify({ error: "Firecrawl connector not configured." }),
         { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
       );
     }
@@ -32,55 +32,91 @@ serve(async (req) => {
       });
     }
 
-    // Step 1: Scrape Racius for the NIF
     console.log(`Looking up NIF: ${nif}`);
-    const raciusResponse = await fetch("https://api.firecrawl.dev/v1/scrape", {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${FIRECRAWL_API_KEY}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        url: `https://www.racius.com/observatorio/${nif}/`,
-        formats: ["markdown"],
-        onlyMainContent: true,
-      }),
-    });
 
-    let raciusData = null;
-    if (raciusResponse.ok) {
-      raciusData = await raciusResponse.json();
+    // Strategy: run 3 lookups in parallel for maximum hit rate
+    const [raciusResult, einformaResult, googleResult] = await Promise.allSettled([
+      // 1. Direct Racius scrape
+      fetch("https://api.firecrawl.dev/v1/scrape", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${FIRECRAWL_API_KEY}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          url: `https://www.racius.com/observatorio/${nif}/`,
+          formats: ["markdown"],
+          onlyMainContent: true,
+        }),
+      }).then(async (r) => {
+        if (!r.ok) throw new Error(`Racius ${r.status}`);
+        return r.json();
+      }),
+
+      // 2. Direct Einforma scrape
+      fetch("https://api.firecrawl.dev/v1/scrape", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${FIRECRAWL_API_KEY}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          url: `https://www.einforma.pt/servlet/app/portal/ENTP/screen/SProducto/prod/ETIQUETA_EMPRESA/nif/${nif}`,
+          formats: ["markdown"],
+          onlyMainContent: true,
+        }),
+      }).then(async (r) => {
+        if (!r.ok) throw new Error(`Einforma ${r.status}`);
+        return r.json();
+      }),
+
+      // 3. Google search targeting racius + einforma + general
+      fetch("https://api.firecrawl.dev/v1/search", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${FIRECRAWL_API_KEY}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          query: `"${nif}" site:racius.com OR site:einforma.pt OR site:portugalia.com OR site:informadb.pt`,
+          limit: 5,
+          lang: "pt",
+          country: "PT",
+        }),
+      }).then(async (r) => {
+        if (!r.ok) throw new Error(`Search ${r.status}`);
+        return r.json();
+      }),
+    ]);
+
+    // Build context from all sources
+    const contextParts: string[] = [];
+
+    if (raciusResult.status === "fulfilled" && raciusResult.value?.data?.markdown) {
+      contextParts.push(`Racius page:\n${raciusResult.value.data.markdown.substring(0, 3000)}`);
+      console.log("Racius: OK");
     } else {
-      console.log("Racius scrape failed, trying Google search");
+      console.log("Racius: failed", raciusResult.status === "rejected" ? raciusResult.reason : "no data");
     }
 
-    // Step 2: Google search for more info
-    const searchResponse = await fetch("https://api.firecrawl.dev/v1/search", {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${FIRECRAWL_API_KEY}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        query: `"${nif}" empresa portugal email contacto`,
-        limit: 5,
-        lang: "pt",
-        country: "PT",
-      }),
-    });
-
-    let searchData = null;
-    if (searchResponse.ok) {
-      searchData = await searchResponse.json();
+    if (einformaResult.status === "fulfilled" && einformaResult.value?.data?.markdown) {
+      contextParts.push(`Einforma page:\n${einformaResult.value.data.markdown.substring(0, 3000)}`);
+      console.log("Einforma: OK");
+    } else {
+      console.log("Einforma: failed", einformaResult.status === "rejected" ? einformaResult.reason : "no data");
     }
 
-    // Step 3: Use AI to extract structured supplier info
-    const context = [
-      raciusData?.data?.markdown ? `Racius page:\n${raciusData.data.markdown.substring(0, 3000)}` : "",
-      searchData?.data
-        ? `Google results:\n${searchData.data.map((r: any) => `${r.title}: ${r.description}\n${r.markdown?.substring(0, 500) || ""}`).join("\n\n")}`
-        : "",
-    ].filter(Boolean).join("\n\n---\n\n");
+    if (googleResult.status === "fulfilled" && googleResult.value?.data?.length) {
+      const searchText = googleResult.value.data
+        .map((r: any) => `${r.title}: ${r.description}\n${r.markdown?.substring(0, 500) || ""}`)
+        .join("\n\n");
+      contextParts.push(`Google results:\n${searchText}`);
+      console.log(`Google: ${googleResult.value.data.length} results`);
+    } else {
+      console.log("Google: failed", googleResult.status === "rejected" ? googleResult.reason : "no data");
+    }
+
+    const context = contextParts.join("\n\n---\n\n");
 
     if (!context.trim()) {
       return new Response(JSON.stringify({ success: false, error: "No data found for this NIF" }), {
@@ -88,6 +124,7 @@ serve(async (req) => {
       });
     }
 
+    // Use AI to extract structured supplier info
     const aiResponse = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
       headers: {
@@ -98,11 +135,12 @@ serve(async (req) => {
       body: JSON.stringify({
         model: "claude-sonnet-4-20250514",
         max_tokens: 1024,
-        system: "Extract company information from the provided web data. Return ONLY a valid JSON object with these fields: legal_name, name, address, email, phone, confidence_score (0-100). No markdown, no code blocks.",
+        system:
+          "Extract company information from the provided web data for a Portuguese company. Return ONLY a valid JSON object with these fields: legal_name (official registered name), name (trading/common name), address, email, phone, confidence_score (0-100). If you find partial data, still return what you can. No markdown, no code blocks.",
         messages: [
           {
             role: "user",
-            content: `Extract company info for NIF ${nif} from this data:\n\n${context}`,
+            content: `Extract company info for Portuguese NIF ${nif} from this data:\n\n${context}`,
           },
         ],
       }),
@@ -131,7 +169,7 @@ serve(async (req) => {
     }
     const companyInfo = JSON.parse(jsonStr);
 
-    // Step 4: Upsert supplier in database
+    // Upsert supplier in database
     const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
     const supabaseKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
     const supabase = createClient(supabaseUrl, supabaseKey);
