@@ -3,7 +3,6 @@ import { useCompany } from "@/hooks/useCompany";
 import { supabase } from "@/integrations/supabase/client";
 import type { Tables } from "@/integrations/supabase/types";
 import { Card } from "@/components/ui/card";
-import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import {
   Table,
@@ -13,33 +12,64 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { Search, Building2 } from "lucide-react";
+import { Search } from "lucide-react";
 
 type Supplier = Tables<"suppliers">;
+type Invoice = Tables<"invoices">;
+
+interface SupplierWithInvoices extends Supplier {
+  invoiceCount: number;
+  invoiceTotal: number;
+}
 
 const Suppliers = () => {
   const { selectedCompany } = useCompany();
-  const [suppliers, setSuppliers] = useState<Supplier[]>([]);
+  const [suppliers, setSuppliers] = useState<SupplierWithInvoices[]>([]);
   const [search, setSearch] = useState("");
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     if (!selectedCompany) return;
-    const fetch = async () => {
+    const fetchData = async () => {
       setLoading(true);
-      const { data } = await supabase
-        .from("suppliers")
-        .select("*")
-        .eq("company_id", selectedCompany.id)
-        .order("name");
-      setSuppliers(data || []);
+      const [{ data: suppliersData }, { data: invoicesData }] = await Promise.all([
+        supabase
+          .from("suppliers")
+          .select("*")
+          .eq("company_id", selectedCompany.id)
+          .order("name"),
+        supabase
+          .from("invoices")
+          .select("supplier_nif, amount")
+          .eq("company_id", selectedCompany.id),
+      ]);
+
+      // Aggregate invoices by supplier NIF
+      const invoiceAgg = new Map<string, { count: number; total: number }>();
+      (invoicesData || []).forEach((inv) => {
+        if (!inv.supplier_nif) return;
+        const existing = invoiceAgg.get(inv.supplier_nif) || { count: 0, total: 0 };
+        existing.count += 1;
+        existing.total += Number(inv.amount) || 0;
+        invoiceAgg.set(inv.supplier_nif, existing);
+      });
+
+      const enriched: SupplierWithInvoices[] = (suppliersData || []).map((s) => {
+        const agg = invoiceAgg.get(s.nif) || { count: 0, total: 0 };
+        return { ...s, invoiceCount: agg.count, invoiceTotal: agg.total };
+      });
+
+      setSuppliers(enriched);
       setLoading(false);
     };
-    fetch();
+    fetchData();
   }, [selectedCompany]);
 
   const filtered = suppliers.filter(
-    (s) => s.name.toLowerCase().includes(search.toLowerCase()) || s.nif.includes(search)
+    (s) =>
+      s.name.toLowerCase().includes(search.toLowerCase()) ||
+      (s.legal_name || "").toLowerCase().includes(search.toLowerCase()) ||
+      s.nif.includes(search)
   );
 
   if (!selectedCompany) {
@@ -63,10 +93,10 @@ const Suppliers = () => {
           <TableHeader>
             <TableRow>
               <TableHead>Nome</TableHead>
-              <TableHead>NIF</TableHead>
               <TableHead>Email</TableHead>
               <TableHead>Telefone</TableHead>
-              <TableHead>Confiança</TableHead>
+              <TableHead className="text-right">Faturas</TableHead>
+              <TableHead className="text-right">Total</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
@@ -79,18 +109,19 @@ const Suppliers = () => {
             ) : (
               filtered.map((s) => (
                 <TableRow key={s.id}>
-                  <TableCell className="font-medium">{s.legal_name || s.name}</TableCell>
-                  <TableCell className="font-mono text-xs">{s.nif}</TableCell>
-                  <TableCell>{s.email || "—"}</TableCell>
-                  <TableCell>{s.phone || "—"}</TableCell>
                   <TableCell>
-                    {s.confidence_score != null ? (
-                      <Badge variant={Number(s.confidence_score) >= 0.7 ? "default" : "secondary"} className={Number(s.confidence_score) >= 0.7 ? "bg-success text-success-foreground border-0" : ""}>
-                        {Math.round(Number(s.confidence_score) * 100)}%
-                      </Badge>
-                    ) : (
-                      "—"
-                    )}
+                    <div>
+                      <span className="font-medium">{s.legal_name || s.name}</span>
+                      <span className="block text-xs text-muted-foreground font-mono">{s.nif}</span>
+                    </div>
+                  </TableCell>
+                  <TableCell className="text-sm">{s.email || "—"}</TableCell>
+                  <TableCell className="text-sm">{s.phone || "—"}</TableCell>
+                  <TableCell className="text-right">{s.invoiceCount}</TableCell>
+                  <TableCell className="text-right font-medium">
+                    {s.invoiceTotal > 0
+                      ? `€${s.invoiceTotal.toLocaleString("pt-PT", { minimumFractionDigits: 2 })}`
+                      : "—"}
                   </TableCell>
                 </TableRow>
               ))
