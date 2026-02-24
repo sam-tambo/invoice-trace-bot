@@ -67,6 +67,7 @@ Deno.serve(async (req) => {
         client_secret: nylasApiKey,
         redirect_uri,
         grant_type: "authorization_code",
+        code_verifier: "nylas",
       }),
     });
 
