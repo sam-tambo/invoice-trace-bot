@@ -8,6 +8,7 @@ import { useToast } from "@/hooks/use-toast";
 import { Mail, Link2, Unlink, Loader2 } from "lucide-react";
 
 const GMAIL_CODE_KEY = "gmail_oauth_code";
+const GMAIL_REDIRECT_URI_KEY = "gmail_oauth_redirect_uri";
 
 const GmailConnectionCard = () => {
   const { selectedCompany } = useCompany();
@@ -80,9 +81,9 @@ const GmailConnectionCard = () => {
     if (!selectedCompany) return;
     setConnecting(true);
     try {
-      // Use the current origin for redirect_uri — must match what was used in connectGmail
-      const redirectUri = `${window.location.origin}/settings`;
-      console.log("Exchanging Gmail code with redirect_uri:", redirectUri);
+    // Use the saved redirect_uri to ensure it matches what was used in connectGmail
+    const redirectUri = sessionStorage.getItem(GMAIL_REDIRECT_URI_KEY) || `${window.location.origin}/settings`;
+    console.log("Exchanging Gmail code with redirect_uri:", redirectUri);
 
       const { data, error } = await supabase.functions.invoke("gmail-auth-callback", {
         body: { code, redirect_uri: redirectUri, company_id: selectedCompany.id },
@@ -91,13 +92,15 @@ const GmailConnectionCard = () => {
       if (error) throw error;
       if (data?.error) throw new Error(data.error);
 
-      // Clear saved code on success
+      // Clear saved data on success
       sessionStorage.removeItem(GMAIL_CODE_KEY);
+      sessionStorage.removeItem(GMAIL_REDIRECT_URI_KEY);
       toast({ title: "Gmail ligado!", description: `Conta: ${data.email_address}` });
       fetchConnection();
     } catch (err: any) {
       console.error("Gmail callback error:", err);
       sessionStorage.removeItem(GMAIL_CODE_KEY);
+      sessionStorage.removeItem(GMAIL_REDIRECT_URI_KEY);
       toast({ title: "Erro ao ligar Gmail", description: err.message, variant: "destructive" });
     } finally {
       setConnecting(false);
@@ -116,6 +119,8 @@ const GmailConnectionCard = () => {
 
     // Use current origin — the redirect must come back to THIS domain
     const redirectUri = `${window.location.origin}/settings`;
+    // Persist redirect_uri so the callback exchange uses the exact same value
+    sessionStorage.setItem(GMAIL_REDIRECT_URI_KEY, redirectUri);
     
     // Nylas Hosted Auth URL
     const url = new URL("https://api.us.nylas.com/v3/connect/auth");
