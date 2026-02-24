@@ -12,7 +12,9 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { Search } from "lucide-react";
+import { Search, Pencil, Check, X } from "lucide-react";
+import { Button } from "@/components/ui/button";
+import { toast } from "sonner";
 
 type Supplier = Tables<"suppliers">;
 type Invoice = Tables<"invoices">;
@@ -27,6 +29,38 @@ const Suppliers = () => {
   const [suppliers, setSuppliers] = useState<SupplierWithInvoices[]>([]);
   const [search, setSearch] = useState("");
   const [loading, setLoading] = useState(true);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editEmail, setEditEmail] = useState("");
+  const [editPhone, setEditPhone] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  const startEdit = (s: SupplierWithInvoices) => {
+    setEditingId(s.id);
+    setEditEmail(s.email || "");
+    setEditPhone(s.phone || "");
+  };
+
+  const cancelEdit = () => {
+    setEditingId(null);
+  };
+
+  const saveEdit = async (id: string) => {
+    setSaving(true);
+    const { error } = await supabase
+      .from("suppliers")
+      .update({ email: editEmail || null, phone: editPhone || null })
+      .eq("id", id);
+    setSaving(false);
+    if (error) {
+      toast.error("Erro ao guardar");
+      return;
+    }
+    setSuppliers((prev) =>
+      prev.map((s) => (s.id === id ? { ...s, email: editEmail || null, phone: editPhone || null } : s))
+    );
+    setEditingId(null);
+    toast.success("Contacto atualizado");
+  };
 
   useEffect(() => {
     if (!selectedCompany) return;
@@ -97,12 +131,13 @@ const Suppliers = () => {
               <TableHead>Telefone</TableHead>
               <TableHead className="text-right">Faturas</TableHead>
               <TableHead className="text-right">Total</TableHead>
+              <TableHead className="w-[80px]"></TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
             {filtered.length === 0 ? (
               <TableRow>
-                <TableCell colSpan={5} className="text-center py-10 text-muted-foreground">
+                <TableCell colSpan={6} className="text-center py-10 text-muted-foreground">
                   {loading ? "A carregar..." : "Nenhum fornecedor encontrado."}
                 </TableCell>
               </TableRow>
@@ -115,13 +150,41 @@ const Suppliers = () => {
                       <span className="block text-xs text-muted-foreground font-mono">{s.nif}</span>
                     </div>
                   </TableCell>
-                  <TableCell className="text-sm">{s.email || "—"}</TableCell>
-                  <TableCell className="text-sm">{s.phone || "—"}</TableCell>
+                  <TableCell className="text-sm">
+                    {editingId === s.id ? (
+                      <Input value={editEmail} onChange={(e) => setEditEmail(e.target.value)} className="h-8 text-sm" placeholder="email@exemplo.pt" />
+                    ) : (
+                      s.email || "—"
+                    )}
+                  </TableCell>
+                  <TableCell className="text-sm">
+                    {editingId === s.id ? (
+                      <Input value={editPhone} onChange={(e) => setEditPhone(e.target.value)} className="h-8 text-sm" placeholder="912345678" />
+                    ) : (
+                      s.phone || "—"
+                    )}
+                  </TableCell>
                   <TableCell className="text-right">{s.invoiceCount}</TableCell>
                   <TableCell className="text-right font-medium">
                     {s.invoiceTotal > 0
                       ? `€${s.invoiceTotal.toLocaleString("pt-PT", { minimumFractionDigits: 2 })}`
                       : "—"}
+                  </TableCell>
+                  <TableCell>
+                    {editingId === s.id ? (
+                      <div className="flex gap-1">
+                        <Button size="icon" variant="ghost" className="h-7 w-7" onClick={() => saveEdit(s.id)} disabled={saving}>
+                          <Check className="h-4 w-4" />
+                        </Button>
+                        <Button size="icon" variant="ghost" className="h-7 w-7" onClick={cancelEdit}>
+                          <X className="h-4 w-4" />
+                        </Button>
+                      </div>
+                    ) : (
+                      <Button size="icon" variant="ghost" className="h-7 w-7" onClick={() => startEdit(s)}>
+                        <Pencil className="h-3.5 w-3.5" />
+                      </Button>
+                    )}
                   </TableCell>
                 </TableRow>
               ))
