@@ -1,79 +1,64 @@
 
 
-## Pesquisa Automatica de Faturas no Gmail + Monitorizacao em Tempo Real
+## Diagnosis: Why Gmail Connection Keeps Failing Silently
 
-### Resumo
-Duas funcionalidades complementares: (1) melhorar o scan existente para pesquisar faturas em falta no Gmail, e (2) criar um webhook Nylas para processar automaticamente emails novos quando chegam ao inbox.
+### Root Cause Found
 
-### Problemas a Corrigir Primeiro
+I checked the edge function logs and found **zero POST requests** to `gmail-auth-callback` -- only GETs (fetching the client ID). The code exchange POST is never reaching the function.
 
-1. **URL do AI Gateway errada** -- `scan-gmail-invoices` usa `api.lovable.dev` em vez de `ai.gateway.lovable.dev`
-2. **config.toml incompleto** -- faltam entradas para `scan-gmail-invoices`, `gmail-auth-callback` e o novo webhook
+**Primary Issue: Incomplete CORS headers** in `gmail-auth-callback/index.ts`.
 
-### Funcionalidade 1: Melhorar o Scan Existente
-
-O `scan-gmail-invoices` ja faz a pesquisa, mas precisa de:
-- Corrigir o URL do AI para `https://ai.gateway.lovable.dev/v1/chat/completions`
-- Pesquisar por invoice_number directamente no corpo dos emails (nao so em anexos)
-- Melhorar a query de pesquisa para incluir termos como "fatura", "invoice" alem do nome do fornecedor
-
-### Funcionalidade 2: Webhook Nylas para Novos Emails
-
-Nova edge function `nylas-webhook` que:
-- Recebe notificacoes `message.created` do Nylas
-- Para cada email novo com anexos, descarrega e analisa com AI
-- Tenta fazer match com faturas em falta (por invoice_number ou amount)
-- Se encontrar match, actualiza o status para "received" e guarda o ficheiro
-- Se nao encontrar match, guarda na `inbox_messages` para revisao manual
-
-```text
-Fluxo:
-  Email chega ao Gmail
-    -> Nylas detecta novo email
-    -> POST webhook para /nylas-webhook
-    -> Edge function processa:
-       1. Identifica supplier pelo from_email
-       2. Descarrega anexos PDF/imagem
-       3. Analisa com Lovable AI (Gemini)
-       4. Match com faturas missing/contacted
-       5. Actualiza status + guarda ficheiro
-       6. Regista em inbox_messages
+The function currently allows:
+```
+authorization, x-client-info, apikey, content-type
 ```
 
-### Alteracoes Tecnicas
+But `supabase.functions.invoke()` sends additional headers that the browser's CORS preflight check rejects:
+```
+x-supabase-client-platform, x-supabase-client-platform-version, 
+x-supabase-client-runtime, x-supabase-client-runtime-version
+```
 
-**1. Corrigir `scan-gmail-invoices/index.ts`**
-- Alterar URL de `https://api.lovable.dev/v1/chat/completions` para `https://ai.gateway.lovable.dev/v1/chat/completions`
+When the preflight OPTIONS request fails, the browser silently blocks the POST. The code is captured from the URL, but the exchange call never reaches the server. No error is shown because the CORS failure happens at browser level before the fetch completes.
 
-**2. Criar `supabase/functions/nylas-webhook/index.ts`**
-- Endpoint POST que recebe eventos do Nylas
-- Valida o webhook (Nylas challenge verification)
-- Para eventos `message.created`:
-  - Busca o grant_id da `email_connections` pela conta notificada
-  - Descarrega a mensagem completa via Nylas API
-  - Se tem anexos PDF/imagem, analisa com Lovable AI
-  - Faz match com faturas em falta
-  - Guarda em `inbox_messages` e `attachments`
+**Secondary Issue: Redirect URI mismatch risk.** If the user initiates from the preview domain but Nylas redirects to a different domain, the `redirect_uri` sent during code exchange won't match the one used during the initial auth request, causing Nylas to reject it.
 
-**3. Actualizar `supabase/config.toml`**
-- Adicionar entradas para todas as funcoes que faltam:
-  - `scan-gmail-invoices` com `verify_jwt = false`
-  - `gmail-auth-callback` com `verify_jwt = false`
-  - `nylas-webhook` com `verify_jwt = false`
+### Fixes Required
 
-**4. Actualizar `receive-email/index.ts`**
-- Migrar de Anthropic API para Lovable AI Gateway (consistencia)
+**1. Fix CORS headers in `gmail-auth-callback/index.ts`**
 
-### Configuracao do Webhook no Nylas Dashboard
+Update the `corsHeaders` to include all headers sent by the Supabase JS client:
 
-Apos implementacao, o utilizador precisa de configurar no Nylas dashboard:
-- **Webhook URL**: `https://uxttxsscvirkgvnltvfd.supabase.co/functions/v1/nylas-webhook`
-- **Trigger**: `message.created`
+```javascript
+const corsHeaders = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Headers":
+    "authorization, x-client-info, apikey, content-type, x-supabase-client-platform, x-supabase-client-platform-version, x-supabase-client-runtime, x-supabase-client-runtime-version",
+};
+```
 
-### Passos de Implementacao
-1. Corrigir URL do AI em `scan-gmail-invoices`
-2. Adicionar funcoes em falta ao `config.toml`
-3. Criar edge function `nylas-webhook`
-4. Migrar `receive-email` para Lovable AI
-5. Deploy e testar
+**2. Add better error handling in `GmailConnectionCard.tsx`**
+
+The `handleCallback` function catches errors but a CORS failure might not produce a meaningful message. Add explicit logging and handle network-level failures:
+
+```typescript
+const { data, error } = await supabase.functions.invoke("gmail-auth-callback", {
+  body: { code, redirect_uri: redirectUri, company_id: selectedCompany.id },
+});
+console.log("Gmail callback response:", { data, error });
+```
+
+**3. Fix redirect URI consistency**
+
+Store the exact `redirect_uri` used during `connectGmail` in `sessionStorage` alongside the code, so that `handleCallback` uses the exact same URI for the exchange -- regardless of which domain the redirect lands on.
+
+**4. Redeploy and test**
+
+After fixing, deploy the edge function and test the full flow end-to-end by calling the function directly to verify it responds to POST requests.
+
+### Implementation Steps
+1. Fix CORS headers in `gmail-auth-callback/index.ts`
+2. Update `GmailConnectionCard.tsx` to persist and reuse the exact redirect_uri
+3. Add better error logging in the callback handler
+4. Deploy and test the edge function with a direct POST call
 
