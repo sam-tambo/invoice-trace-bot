@@ -8,13 +8,14 @@ import { Label } from "@/components/ui/label";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Separator } from "@/components/ui/separator";
 import { useToast } from "@/hooks/use-toast";
-import { Plus, Building2, Save } from "lucide-react";
+import { Plus, Building2 } from "lucide-react";
 import {
   Dialog,
   DialogContent,
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import GmailConnectionCard from "@/components/GmailConnectionCard";
 
 const SettingsPage = () => {
   const { user } = useAuth();
@@ -90,6 +91,8 @@ const SettingsPage = () => {
           ))}
         </CardContent>
       </Card>
+
+      <GmailConnectionCard />
 
       <Dialog open={newCompanyOpen} onOpenChange={setNewCompanyOpen}>
         <DialogContent>
