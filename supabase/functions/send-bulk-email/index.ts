@@ -37,10 +37,8 @@ Deno.serve(async (req) => {
     const userClient = createClient(supabaseUrl, Deno.env.get("SUPABASE_ANON_KEY")!, {
       global: { headers: { Authorization: authHeader } },
     });
-    const { data: claimsData, error: claimsError } = await userClient.auth.getClaims(
-      authHeader.replace("Bearer ", "")
-    );
-    if (claimsError || !claimsData?.claims) {
+    const { data: { user }, error: userError } = await userClient.auth.getUser();
+    if (userError || !user) {
       return new Response(JSON.stringify({ error: "Unauthorized" }), {
         status: 401,
         headers: { ...corsHeaders, "Content-Type": "application/json" },
@@ -48,6 +46,22 @@ Deno.serve(async (req) => {
     }
 
     const { company_id, invoice_ids } = await req.json();
+
+    // Verify user is a member of the requested company
+    // db already created above for membership check
+    const { data: membership } = await db
+      .from("company_memberships")
+      .select("id")
+      .eq("company_id", company_id)
+      .eq("user_id", user.id)
+      .maybeSingle();
+
+    if (!membership) {
+      return new Response(JSON.stringify({ error: "Forbidden: not a member of this company" }), {
+        status: 403,
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
+    }
     if (!company_id) {
       return new Response(JSON.stringify({ error: "company_id required" }), {
         status: 400,
