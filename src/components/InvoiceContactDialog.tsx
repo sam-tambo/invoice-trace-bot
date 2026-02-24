@@ -22,7 +22,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { Mail, MessageSquare, Send } from "lucide-react";
+import { Mail, MessageSquare, Send, Upload, FileText, Link2, Loader2, Trash2 } from "lucide-react";
 import { format } from "date-fns";
 import { pt } from "date-fns/locale";
 
@@ -76,6 +76,68 @@ export default function InvoiceContactDialog({ invoice, onClose, onStatusChange 
   const [body, setBody] = useState("");
   const [sending, setSending] = useState(false);
   const [supplier, setSupplier] = useState<Tables<"suppliers"> | null>(null);
+  const [attachments, setAttachments] = useState<Tables<"attachments">[]>([]);
+  const [uploading, setUploading] = useState(false);
+
+  const fetchAttachments = async (invoiceId: string) => {
+    const { data } = await supabase
+      .from("attachments")
+      .select("*")
+      .eq("invoice_id", invoiceId)
+      .order("created_at", { ascending: false });
+    setAttachments(data || []);
+  };
+
+  const getPublicUrl = (filePath: string) => {
+    const { data } = supabase.storage.from("invoice-files").getPublicUrl(filePath);
+    return data.publicUrl;
+  };
+
+  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (!invoice || !selectedCompany || !user || !e.target.files?.length) return;
+    const file = e.target.files[0];
+    setUploading(true);
+
+    const filePath = `${selectedCompany.id}/${invoice.id}/${Date.now()}-${file.name}`;
+    const { error: uploadError } = await supabase.storage
+      .from("invoice-files")
+      .upload(filePath, file);
+
+    if (uploadError) {
+      toast({ title: "Erro no upload", description: uploadError.message, variant: "destructive" });
+      setUploading(false);
+      return;
+    }
+
+    const { error: dbError } = await supabase.from("attachments").insert({
+      invoice_id: invoice.id,
+      company_id: selectedCompany.id,
+      uploaded_by: user.id,
+      file_name: file.name,
+      file_path: filePath,
+      file_type: file.type || null,
+      file_size: file.size,
+    });
+
+    if (dbError) {
+      toast({ title: "Erro ao guardar", description: dbError.message, variant: "destructive" });
+    } else {
+      toast({ title: "Ficheiro carregado!" });
+      // Mark invoice as received since file was uploaded
+      await supabase.from("invoices").update({ status: "received" }).eq("id", invoice.id);
+      onStatusChange?.();
+    }
+
+    await fetchAttachments(invoice.id);
+    setUploading(false);
+    e.target.value = "";
+  };
+
+  const copyLink = (filePath: string) => {
+    const url = getPublicUrl(filePath);
+    navigator.clipboard.writeText(url);
+    toast({ title: "Link copiado!" });
+  };
 
   useEffect(() => {
     if (!invoice) return;
@@ -86,6 +148,9 @@ export default function InvoiceContactDialog({ invoice, onClose, onStatusChange 
       .eq("invoice_id", invoice.id)
       .order("sent_at", { ascending: false })
       .then(({ data }) => setOutreachLogs(data || []));
+
+    // Fetch attachments
+    fetchAttachments(invoice.id);
 
     // Fetch supplier info for email/phone
     if (invoice.supplier_id) {
@@ -229,6 +294,42 @@ export default function InvoiceContactDialog({ invoice, onClose, onStatusChange 
               </Button>
             </div>
           )}
+
+          {/* Attachments / Upload */}
+          <div className="space-y-2">
+            <h4 className="text-sm font-semibold">Ficheiros da Fatura</h4>
+            {attachments.length > 0 ? (
+              <div className="space-y-2">
+                {attachments.map((att) => (
+                  <div key={att.id} className="flex items-center gap-2 rounded-lg border p-2 text-sm">
+                    <FileText className="h-4 w-4 text-muted-foreground shrink-0" />
+                    <a
+                      href={getPublicUrl(att.file_path)}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="flex-1 truncate text-primary hover:underline"
+                    >
+                      {att.file_name}
+                    </a>
+                    <Button variant="ghost" size="icon" className="h-7 w-7 shrink-0" onClick={() => copyLink(att.file_path)}>
+                      <Link2 className="h-3.5 w-3.5" />
+                    </Button>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <p className="text-sm text-muted-foreground">Nenhum ficheiro carregado.</p>
+            )}
+            <div>
+              <Label htmlFor="file-upload" className="cursor-pointer">
+                <div className="flex items-center gap-2 rounded-lg border border-dashed p-3 text-sm text-muted-foreground hover:bg-muted/50 transition-colors">
+                  {uploading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Upload className="h-4 w-4" />}
+                  {uploading ? "A carregar..." : "Carregar fatura (PDF, imagem...)"}
+                </div>
+              </Label>
+              <input id="file-upload" type="file" className="hidden" accept=".pdf,.png,.jpg,.jpeg,.webp" onChange={handleFileUpload} disabled={uploading} />
+            </div>
+          </div>
 
           {/* Outreach history */}
           <div>
