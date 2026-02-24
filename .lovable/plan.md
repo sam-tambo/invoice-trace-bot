@@ -1,118 +1,144 @@
 
 
-# Redesign Import Page: PDF Parsing, Agent Actions, and Invoice Upload
+# Bulk Email, Inbox & Auto-Detection de Faturas
 
-## What We're Building
+## Resumo
 
-The import page will be completely redesigned to handle the **TOConline "Mapa de conferencia e-Fatura" PDF format**, display imported invoices in a rich table with supplier match status, and provide agent actions for bulk and individual invoice recovery.
+Implementar um sistema completo de comunicacao com fornecedores: envio de emails em massa para pedir faturas em falta, caixa de entrada para monitorizar respostas, e detecao automatica de faturas anexadas nas respostas dos fornecedores.
 
----
-
-## 1. PDF Parsing Edge Function
-
-Create a backend function (`parse-efatura-pdf`) that:
-- Accepts a PDF file upload
-- Uses an AI model (Lovable AI - Gemini 2.5 Flash) to extract the table data from the PDF
-- Returns structured rows with: NIF, Date, Invoice Number (Doc. Compra), Net Amount, VAT, Total, Status
-- Handles the multi-page TOConline format (repeated headers, page footers)
-
-The PDF columns map as follows:
-| PDF Column | Database Field |
-|---|---|
-| Numero do documento do fornecedor | `supplier_nif` |
-| Data | `issue_date` |
-| Doc. Compra | `invoice_number` |
-| Valor liquido | stored as metadata |
-| IVA | stored as metadata |
-| Total do documento e-fatura | `amount` |
-
-## 2. Redesigned Import Page (`/import`)
-
-Replace the current CSV-only import with a new flow:
-
-**Step 1 - Upload**: Accept PDF (`.pdf`) or CSV files. Show drag-and-drop area.
-
-**Step 2 - Review Table**: After parsing, display all extracted invoices in a table matching the PDF layout:
-- NIF | Fornecedor | Doc. Compra | Data | Valor Liquido | IVA | Total | Fornecedor Encontrado?
-- The "Fornecedor Encontrado?" column shows a green check if the NIF already exists in the `suppliers` table with an email, or a red X if not
-- Checkboxes for selecting individual rows
-- "Select All" checkbox in the header
-
-**Step 3 - Actions**:
-- **"Importar Selecionadas"** button to save selected invoices to the database
-- **"Procurar Fornecedores em Massa"** (Bulk Agent) button: triggers NIF lookups for all unmatched suppliers via Firecrawl
-- **"Procurar"** button per row: triggers individual NIF lookup
-
-## 3. Agent: Find Invoices (Bulk and Individual)
-
-Create an edge function (`nif-lookup`) that:
-- Takes a NIF and uses Firecrawl to search `racius.com` + Google for the company
-- Extracts: legal name, address, email, phone
-- Stores/updates the `suppliers` table with found data and confidence score
-- Returns the result to the frontend
-
-**Requires**: Firecrawl connector to be set up (we'll prompt the user to connect it).
-
-## 4. Invoice Upload and Email Matching
-
-Add two ways to submit received invoices:
-
-**A. Upload Invoice File**: 
-- Button per invoice row to upload a PDF/image of the received invoice
-- Stores in the `invoice-files` storage bucket (already exists)
-- Creates an `attachments` record
-- Updates invoice status to "received"
-
-**B. Email-to-Agent** (forward invoice by email):
-- Create an edge function (`receive-invoice-email`) that accepts inbound emails (via Resend webhook)
-- Parses the email for invoice references (NIF, invoice number)
-- Matches against existing missing invoices
-- Stores the attachment and marks the invoice as received
-- This requires Resend integration (will be set up in a follow-up step)
-
-## 5. Database Changes
-
-Add columns to the `invoices` table for the additional PDF data:
-- `net_amount` (numeric, nullable) - Valor liquido
-- `vat_amount` (numeric, nullable) - IVA
-
-## Technical Details
-
-### Files to Create:
-1. `supabase/functions/parse-efatura-pdf/index.ts` - PDF parsing via Lovable AI
-2. `supabase/functions/nif-lookup/index.ts` - Supplier lookup via Firecrawl
-3. `src/pages/ImportInvoices.tsx` - Complete rewrite with new flow
-
-### Files to Modify:
-1. Database migration - add `net_amount`, `vat_amount` to `invoices`
-
-### Dependencies:
-- Firecrawl connector needed for NIF lookups (will prompt user)
-- Resend connector needed for email agent (future step)
-
-### Edge Function Flow:
+## Arquitectura
 
 ```text
-PDF Upload --> parse-efatura-pdf (AI extraction) --> Structured JSON
-                                                        |
-                                                        v
-                                               Review Table in UI
-                                                        |
-                                        +---------------+---------------+
-                                        |                               |
-                                   Import to DB                  NIF Lookup
-                                        |                    (Firecrawl/Racius)
-                                        v                               |
-                                  invoices table                        v
-                                        |                       suppliers table
-                                        v
-                              Upload received invoice
-                                        |
-                                        v
-                              invoice-files bucket + attachments table
-                              + status -> "received"
++------------------+       +-------------------+       +------------------+
+|  Invoices Page   |       |  send-bulk-email  |       |    Resend API    |
+|  "Pedir Todas"   +------>+  Edge Function    +------>+  (envio real)    |
++------------------+       +-------------------+       +--------+---------+
+                                                                |
+                                                       reply-to: inbox@domain
+                                                                |
++------------------+       +-------------------+       +--------v---------+
+|  Inbox Page      |<------+  receive-email    |<------+  Resend Webhook  |
+|  /inbox          |       |  Edge Function    |       |  (inbound email) |
++------------------+       +--------+----------+       +------------------+
+                                    |
+                           +--------v----------+
+                           | Claude AI parses  |
+                           | attachments for   |
+                           | invoice detection |
+                           +-------------------+
 ```
 
-### RLS Note:
-All existing RLS policies remain. The new columns are part of the existing `invoices` table which already has proper policies. The edge functions will use the service role key for internal operations.
+## O que vamos construir
+
+### 1. Base de dados -- tabela `inbox_messages`
+Nova tabela para guardar todas as mensagens recebidas e enviadas:
+- `id`, `company_id`, `invoice_id` (nullable), `supplier_nif`, `direction` (inbound/outbound)
+- `from_email`, `to_email`, `subject`, `body_text`, `body_html`
+- `has_attachments`, `attachments_parsed`, `matched_invoice_id`
+- `status` (new, read, processed), `created_at`
+- RLS policies scoped por `is_company_member(company_id)`
+
+### 2. Edge Function: `send-bulk-email`
+- Recebe `company_id` e opcionalmente uma lista de `invoice_ids` (se vazio, envia para todas as faturas "missing")
+- Para cada fatura, busca o supplier email e aplica o template padrao
+- Envia via Resend API com `reply-to` configurado para o endere email de inbound
+- Actualiza status das faturas para "contacted" e regista nos `outreach_logs`
+- Guarda cada email enviado na `inbox_messages` com direction=outbound
+
+### 3. Edge Function: `receive-email`  
+- Webhook publico que o Resend chama quando chega um email de resposta
+- Faz parse do payload (from, subject, body, attachments)
+- Identifica o fornecedor pelo email remetente (lookup na tabela `suppliers`)
+- Se tem anexos PDF/imagem, usa Claude para extrair dados da fatura
+- Se detecta fatura, actualiza o invoice status para "received" e guarda o ficheiro no storage bucket
+- Guarda tudo na `inbox_messages`
+
+### 4. Pagina `/inbox` -- Caixa de Entrada
+- Lista de mensagens recebidas agrupadas por fornecedor
+- Cada mensagem mostra: remetente, assunto, preview do corpo, anexos, estado
+- Badge de "Nova" para mensagens nao lidas
+- Ao clicar, abre o detalhe com corpo completo e opcao de ver/descarregar anexos
+- Indicador visual quando uma fatura foi automaticamente detectada
+
+### 5. Botao "Pedir Todas" na pagina de Faturas
+- Novo botao na pagina `/invoices` que dispara o envio em massa
+- Mostra preview: quantas faturas "missing" existem, quantos fornecedores com email
+- Confirmacao antes de enviar
+- Progress feedback durante o envio
+
+### 6. Navegacao
+- Adicionar "Caixa de Entrada" ao sidebar com icone de inbox e badge de contagem de nao lidas
+
+## Pre-requisito: API Key do Resend
+Vamos precisar da tua Resend API key configurada como secret. Tambem precisamos de saber qual o dominio verificado no Resend para configurar o `from` e o `reply-to` dos emails.
+
+## Detalhes Tecnicos
+
+### Migracao SQL
+```sql
+CREATE TABLE public.inbox_messages (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  company_id uuid NOT NULL REFERENCES companies(id),
+  invoice_id uuid REFERENCES invoices(id),
+  supplier_nif text,
+  direction text NOT NULL DEFAULT 'inbound',  -- inbound | outbound
+  from_email text,
+  to_email text,
+  subject text,
+  body_text text,
+  body_html text,
+  has_attachments boolean DEFAULT false,
+  attachments_parsed boolean DEFAULT false,
+  matched_invoice_id uuid REFERENCES invoices(id),
+  status text NOT NULL DEFAULT 'new',  -- new | read | processed
+  raw_payload jsonb,
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+
+ALTER TABLE public.inbox_messages ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY "Members can view inbox" ON public.inbox_messages
+  FOR SELECT USING (is_company_member(company_id));
+CREATE POLICY "Members can insert inbox" ON public.inbox_messages
+  FOR INSERT WITH CHECK (is_company_member(company_id));
+CREATE POLICY "Members can update inbox" ON public.inbox_messages
+  FOR UPDATE USING (is_company_member(company_id));
+```
+
+### Edge Functions config (config.toml)
+```toml
+[functions.send-bulk-email]
+verify_jwt = false
+
+[functions.receive-email]
+verify_jwt = false
+```
+
+### Ficheiros a criar/modificar
+- `supabase/functions/send-bulk-email/index.ts` -- envio em massa via Resend
+- `supabase/functions/receive-email/index.ts` -- webhook para emails recebidos
+- `src/pages/Inbox.tsx` -- pagina da caixa de entrada
+- `src/pages/Invoices.tsx` -- adicionar botao "Pedir Todas em Falta"
+- `src/components/AppLayout.tsx` -- adicionar link "Caixa de Entrada" ao sidebar
+- `src/App.tsx` -- adicionar rota `/inbox`
+- `src/components/BulkEmailDialog.tsx` -- dialog de confirmacao do envio em massa
+- `src/components/InboxMessageDetail.tsx` -- detalhe de uma mensagem recebida
+
+### Fluxo do envio em massa
+1. Utilizador clica "Pedir Todas" na pagina de faturas
+2. Frontend busca todas as faturas com status "missing" que tenham supplier com email
+3. Mostra dialog de confirmacao com contagem
+4. Chama edge function `send-bulk-email`
+5. Edge function itera cada fatura, aplica template, envia via Resend
+6. Actualiza statuses e regista logs
+7. Frontend atualiza a lista
+
+### Fluxo de recepcao de email
+1. Fornecedor responde ao email
+2. Resend chama webhook `receive-email`
+3. Edge function faz parse, identifica fornecedor
+4. Se tem anexo PDF, envia para Claude para extrair dados
+5. Se detecta fatura valida, actualiza status do invoice para "received"
+6. Guarda ficheiro no bucket `invoice-files`
+7. Cria registo na `inbox_messages`
 
