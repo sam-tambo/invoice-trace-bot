@@ -20,11 +20,13 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { Search, Filter, Eye } from "lucide-react";
+import { Button } from "@/components/ui/button";
+import { Search, Filter, Eye, Send } from "lucide-react";
 import { format } from "date-fns";
 import { pt } from "date-fns/locale";
 import { cn } from "@/lib/utils";
 import InvoiceContactDialog from "@/components/InvoiceContactDialog";
+import BulkEmailDialog from "@/components/BulkEmailDialog";
 
 type Invoice = Tables<"invoices">;
 
@@ -49,6 +51,8 @@ const Invoices = () => {
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState("all");
   const [selectedInvoice, setSelectedInvoice] = useState<Invoice | null>(null);
+  const [bulkOpen, setBulkOpen] = useState(false);
+  const [suppliersWithEmail, setSuppliersWithEmail] = useState(0);
 
   const fetchInvoices = async () => {
     if (!selectedCompany) return;
@@ -62,8 +66,19 @@ const Invoices = () => {
     setLoading(false);
   };
 
+  const fetchSuppliersWithEmail = async () => {
+    if (!selectedCompany) return;
+    const { count } = await supabase
+      .from("suppliers")
+      .select("id", { count: "exact", head: true })
+      .eq("company_id", selectedCompany.id)
+      .not("email", "is", null);
+    setSuppliersWithEmail(count || 0);
+  };
+
   useEffect(() => {
     fetchInvoices();
+    fetchSuppliersWithEmail();
   }, [selectedCompany]);
 
   const filtered = invoices.filter((inv) => {
@@ -86,9 +101,15 @@ const Invoices = () => {
 
   return (
     <div className="space-y-6">
-      <div>
-        <h1 className="text-2xl font-bold">Faturas</h1>
-        <p className="text-muted-foreground">Rastreie e acompanhe faturas em falta.</p>
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 className="text-2xl font-bold">Faturas</h1>
+          <p className="text-muted-foreground">Rastreie e acompanhe faturas em falta.</p>
+        </div>
+        <Button onClick={() => setBulkOpen(true)} className="gap-2">
+          <Send className="h-4 w-4" />
+          Pedir Todas em Falta
+        </Button>
       </div>
 
       {/* Filters */}
@@ -163,6 +184,15 @@ const Invoices = () => {
         invoice={selectedInvoice}
         onClose={() => setSelectedInvoice(null)}
         onStatusChange={fetchInvoices}
+      />
+
+      <BulkEmailDialog
+        open={bulkOpen}
+        onClose={() => setBulkOpen(false)}
+        companyId={selectedCompany.id}
+        missingCount={invoices.filter((i) => i.status === "missing").length}
+        withEmailCount={suppliersWithEmail}
+        onComplete={fetchInvoices}
       />
     </div>
   );

@@ -8,6 +8,7 @@ import {
   Upload,
   Building2,
   Mail,
+  Inbox,
   Settings,
   LogOut,
   ChevronDown,
@@ -30,6 +31,7 @@ const navItems = [
   { href: "/import", label: "Importar", icon: Upload },
   { href: "/suppliers", label: "Fornecedores", icon: Building2 },
   { href: "/templates", label: "Modelos", icon: Mail },
+  { href: "/inbox", label: "Caixa de Entrada", icon: Inbox },
   { href: "/settings", label: "Definições", icon: Settings },
 ];
 
