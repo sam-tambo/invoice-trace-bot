@@ -124,6 +124,85 @@ export type Database = {
           },
         ]
       }
+      inbox_messages: {
+        Row: {
+          attachments_parsed: boolean | null
+          body_html: string | null
+          body_text: string | null
+          company_id: string
+          created_at: string
+          direction: string
+          from_email: string | null
+          has_attachments: boolean | null
+          id: string
+          invoice_id: string | null
+          matched_invoice_id: string | null
+          raw_payload: Json | null
+          status: string
+          subject: string | null
+          supplier_nif: string | null
+          to_email: string | null
+        }
+        Insert: {
+          attachments_parsed?: boolean | null
+          body_html?: string | null
+          body_text?: string | null
+          company_id: string
+          created_at?: string
+          direction?: string
+          from_email?: string | null
+          has_attachments?: boolean | null
+          id?: string
+          invoice_id?: string | null
+          matched_invoice_id?: string | null
+          raw_payload?: Json | null
+          status?: string
+          subject?: string | null
+          supplier_nif?: string | null
+          to_email?: string | null
+        }
+        Update: {
+          attachments_parsed?: boolean | null
+          body_html?: string | null
+          body_text?: string | null
+          company_id?: string
+          created_at?: string
+          direction?: string
+          from_email?: string | null
+          has_attachments?: boolean | null
+          id?: string
+          invoice_id?: string | null
+          matched_invoice_id?: string | null
+          raw_payload?: Json | null
+          status?: string
+          subject?: string | null
+          supplier_nif?: string | null
+          to_email?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "inbox_messages_company_id_fkey"
+            columns: ["company_id"]
+            isOneToOne: false
+            referencedRelation: "companies"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "inbox_messages_invoice_id_fkey"
+            columns: ["invoice_id"]
+            isOneToOne: false
+            referencedRelation: "invoices"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "inbox_messages_matched_invoice_id_fkey"
+            columns: ["matched_invoice_id"]
+            isOneToOne: false
+            referencedRelation: "invoices"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       invoices: {
         Row: {
           amount: number | null
