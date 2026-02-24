@@ -5,3 +5,9 @@ verify_jwt = false
 
 [functions.nif-lookup]
 verify_jwt = false
+
+[functions.send-bulk-email]
+verify_jwt = false
+
+[functions.receive-email]
+verify_jwt = false

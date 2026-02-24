@@ -15,6 +15,7 @@ import ImportInvoices from "@/pages/ImportInvoices";
 import Suppliers from "@/pages/Suppliers";
 import Templates from "@/pages/Templates";
 import SettingsPage from "@/pages/Settings";
+import Inbox from "@/pages/Inbox";
 import NotFound from "@/pages/NotFound";
 
 const queryClient = new QueryClient();
@@ -75,6 +76,7 @@ const AppRoutes = () => {
       <Route path="/import" element={<ProtectedRoute><ImportInvoices /></ProtectedRoute>} />
       <Route path="/suppliers" element={<ProtectedRoute><Suppliers /></ProtectedRoute>} />
       <Route path="/templates" element={<ProtectedRoute><Templates /></ProtectedRoute>} />
+      <Route path="/inbox" element={<ProtectedRoute><Inbox /></ProtectedRoute>} />
       <Route path="/settings" element={<ProtectedRoute><SettingsPage /></ProtectedRoute>} />
       <Route path="*" element={<NotFound />} />
     </Routes>
