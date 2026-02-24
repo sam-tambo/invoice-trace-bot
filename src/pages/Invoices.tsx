@@ -1,9 +1,7 @@
 import { useEffect, useState } from "react";
 import { useCompany } from "@/hooks/useCompany";
-import { useAuth } from "@/hooks/useAuth";
 import { supabase } from "@/integrations/supabase/client";
 import type { Tables } from "@/integrations/supabase/types";
-import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { Card } from "@/components/ui/card";
@@ -22,16 +20,11 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import {
-  Dialog,
-  DialogContent,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
 import { Search, Filter, Eye } from "lucide-react";
 import { format } from "date-fns";
 import { pt } from "date-fns/locale";
 import { cn } from "@/lib/utils";
+import InvoiceContactDialog from "@/components/InvoiceContactDialog";
 
 type Invoice = Tables<"invoices">;
 
@@ -56,21 +49,21 @@ const Invoices = () => {
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState("all");
   const [selectedInvoice, setSelectedInvoice] = useState<Invoice | null>(null);
-  const [outreachLogs, setOutreachLogs] = useState<Tables<"outreach_logs">[]>([]);
+
+  const fetchInvoices = async () => {
+    if (!selectedCompany) return;
+    setLoading(true);
+    const { data } = await supabase
+      .from("invoices")
+      .select("*")
+      .eq("company_id", selectedCompany.id)
+      .order("created_at", { ascending: false });
+    setInvoices(data || []);
+    setLoading(false);
+  };
 
   useEffect(() => {
-    if (!selectedCompany) return;
-    const fetch = async () => {
-      setLoading(true);
-      const { data } = await supabase
-        .from("invoices")
-        .select("*")
-        .eq("company_id", selectedCompany.id)
-        .order("created_at", { ascending: false });
-      setInvoices(data || []);
-      setLoading(false);
-    };
-    fetch();
+    fetchInvoices();
   }, [selectedCompany]);
 
   const filtered = invoices.filter((inv) => {
@@ -81,16 +74,6 @@ const Invoices = () => {
     const matchStatus = statusFilter === "all" || inv.status === statusFilter;
     return matchSearch && matchStatus;
   });
-
-  const openDetail = async (inv: Invoice) => {
-    setSelectedInvoice(inv);
-    const { data } = await supabase
-      .from("outreach_logs")
-      .select("*")
-      .eq("invoice_id", inv.id)
-      .order("sent_at", { ascending: false });
-    setOutreachLogs(data || []);
-  };
 
   const daysOutstanding = (inv: Invoice) => {
     const start = inv.issue_date ? new Date(inv.issue_date) : new Date(inv.created_at);
@@ -155,7 +138,7 @@ const Invoices = () => {
               filtered.map((inv) => {
                 const st = statusMap[inv.status] || statusMap.missing;
                 return (
-                  <TableRow key={inv.id} className={cn(rowColorMap[inv.status], "cursor-pointer hover:bg-muted/50")} onClick={() => openDetail(inv)}>
+                  <TableRow key={inv.id} className={cn(rowColorMap[inv.status], "cursor-pointer hover:bg-muted/50")} onClick={() => setSelectedInvoice(inv)}>
                     <TableCell className="font-medium">{inv.supplier_name || "—"}</TableCell>
                     <TableCell className="font-mono text-xs">{inv.supplier_nif || "—"}</TableCell>
                     <TableCell>{inv.invoice_number}</TableCell>
@@ -176,43 +159,11 @@ const Invoices = () => {
         </Table>
       </Card>
 
-      {/* Detail dialog */}
-      <Dialog open={!!selectedInvoice} onOpenChange={() => setSelectedInvoice(null)}>
-        <DialogContent className="max-w-lg">
-          <DialogHeader>
-            <DialogTitle>Fatura {selectedInvoice?.invoice_number}</DialogTitle>
-          </DialogHeader>
-          {selectedInvoice && (
-            <div className="space-y-4">
-              <div className="grid grid-cols-2 gap-4 text-sm">
-                <div><span className="text-muted-foreground">Fornecedor:</span> {selectedInvoice.supplier_name}</div>
-                <div><span className="text-muted-foreground">NIF:</span> {selectedInvoice.supplier_nif}</div>
-                <div><span className="text-muted-foreground">Valor:</span> {selectedInvoice.amount ? `€${Number(selectedInvoice.amount).toFixed(2)}` : "—"}</div>
-                <div><span className="text-muted-foreground">Estado:</span> <Badge variant={statusMap[selectedInvoice.status]?.variant} className={statusMap[selectedInvoice.status]?.className}>{statusMap[selectedInvoice.status]?.label}</Badge></div>
-              </div>
-
-              <div>
-                <h4 className="text-sm font-semibold mb-2">Histórico de Contactos</h4>
-                {outreachLogs.length === 0 ? (
-                  <p className="text-sm text-muted-foreground">Sem contactos registados.</p>
-                ) : (
-                  <div className="space-y-2">
-                    {outreachLogs.map((log) => (
-                      <div key={log.id} className="flex items-start gap-3 rounded-lg border p-3 text-sm">
-                        <div className="flex-1">
-                          <div className="font-medium">{log.subject || log.channel}</div>
-                          <div className="text-muted-foreground text-xs">{format(new Date(log.sent_at), "dd MMM yyyy HH:mm", { locale: pt })}</div>
-                        </div>
-                        <Badge variant="outline" className="text-xs">{log.channel}</Badge>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-            </div>
-          )}
-        </DialogContent>
-      </Dialog>
+      <InvoiceContactDialog
+        invoice={selectedInvoice}
+        onClose={() => setSelectedInvoice(null)}
+        onStatusChange={fetchInvoices}
+      />
     </div>
   );
 };
