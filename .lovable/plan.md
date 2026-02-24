@@ -1,72 +1,79 @@
 
 
-## Integrar Nylas para Acesso ao Gmail
+## Pesquisa Automatica de Faturas no Gmail + Monitorizacao em Tempo Real
 
 ### Resumo
-Substituir o fluxo OAuth custom do Google pelo Nylas API v3 para pesquisar emails e descarregar faturas. O Nylas ja tem as credenciais Google configuradas (como mostrado no screenshot), pelo que so precisamos da API Key e do Grant ID para aceder ao email dos utilizadores.
+Duas funcionalidades complementares: (1) melhorar o scan existente para pesquisar faturas em falta no Gmail, e (2) criar um webhook Nylas para processar automaticamente emails novos quando chegam ao inbox.
 
-### Vantagens
-- Elimina o problema do erro 403 do Google OAuth
-- Nao e preciso gerir tokens OAuth manualmente (o Nylas trata disso)
-- API mais simples e direta para pesquisar emails e descarregar anexos
+### Problemas a Corrigir Primeiro
 
-### O que muda
+1. **URL do AI Gateway errada** -- `scan-gmail-invoices` usa `api.lovable.dev` em vez de `ai.gateway.lovable.dev`
+2. **config.toml incompleto** -- faltam entradas para `scan-gmail-invoices`, `gmail-auth-callback` e o novo webhook
 
-**1. Segredos necessarios**
-- `NYLAS_API_KEY` -- a API key da tua conta Nylas
-- `NYLAS_GRANT_ID` -- o Grant ID do utilizador/conta Google ligada no Nylas
+### Funcionalidade 1: Melhorar o Scan Existente
 
-**2. Edge function: `scan-gmail-invoices`** (reescrita)
-- Usa a Nylas Messages API em vez da Gmail API direta
-- Endpoints:
-  - `GET https://api.us.nylas.com/v3/grants/{grant_id}/messages?q=...&has_attachments=true` para pesquisar emails
-  - `GET https://api.us.nylas.com/v3/grants/{grant_id}/messages/{id}?select=attachments` para obter detalhes
-  - `GET https://api.us.nylas.com/v3/grants/{grant_id}/attachments/{id}/download?message_id=...` para descarregar anexos
-- Autenticacao: header `Authorization: Bearer {NYLAS_API_KEY}`
-- A logica de matching com faturas e upload para storage mantém-se igual
+O `scan-gmail-invoices` ja faz a pesquisa, mas precisa de:
+- Corrigir o URL do AI para `https://ai.gateway.lovable.dev/v1/chat/completions`
+- Pesquisar por invoice_number directamente no corpo dos emails (nao so em anexos)
+- Melhorar a query de pesquisa para incluir termos como "fatura", "invoice" alem do nome do fornecedor
 
-**3. Edge function: `gmail-auth-callback`** (removida ou simplificada)
-- Ja nao e necessaria -- a autenticacao e gerida pelo Nylas dashboard
-- Sera removida ou convertida num endpoint simples que verifica se o Nylas esta configurado
+### Funcionalidade 2: Webhook Nylas para Novos Emails
 
-**4. Componente `GmailConnectionCard`** (simplificado)
-- Remove todo o fluxo OAuth (redirect para Google, callback com code)
-- Mostra apenas o estado da ligacao (configurado/nao configurado) baseado na existencia dos segredos
-- Pode opcionalmente guardar o grant_id na tabela `email_connections` para suporte futuro de multiplos utilizadores
-
-**5. Componente `ScanGmailDialog`** 
-- Sem alteracoes significativas -- continua a chamar a edge function `scan-gmail-invoices`
-
-### Secção Tecnica
+Nova edge function `nylas-webhook` que:
+- Recebe notificacoes `message.created` do Nylas
+- Para cada email novo com anexos, descarrega e analisa com AI
+- Tenta fazer match com faturas em falta (por invoice_number ou amount)
+- Se encontrar match, actualiza o status para "received" e guarda o ficheiro
+- Se nao encontrar match, guarda na `inbox_messages` para revisao manual
 
 ```text
-Antes (OAuth custom):
-  Browser --> Google OAuth --> callback --> gmail-auth-callback (troca code por tokens)
-  scan-gmail-invoices --> refresh token --> Gmail API
-
-Depois (Nylas):
-  scan-gmail-invoices --> Nylas API (com API Key + Grant ID)
-  (sem fluxo OAuth no browser)
+Fluxo:
+  Email chega ao Gmail
+    -> Nylas detecta novo email
+    -> POST webhook para /nylas-webhook
+    -> Edge function processa:
+       1. Identifica supplier pelo from_email
+       2. Descarrega anexos PDF/imagem
+       3. Analisa com Lovable AI (Gemini)
+       4. Match com faturas missing/contacted
+       5. Actualiza status + guarda ficheiro
+       6. Regista em inbox_messages
 ```
 
-**Nylas API calls no edge function:**
-```
-GET /v3/grants/{grant_id}/messages
-  ?q=from:supplier@email.com has:attachment
-  &limit=10
-  Headers: Authorization: Bearer {NYLAS_API_KEY}
+### Alteracoes Tecnicas
 
-GET /v3/grants/{grant_id}/attachments/{att_id}/download
-  ?message_id={msg_id}
-  Headers: Authorization: Bearer {NYLAS_API_KEY}
-```
+**1. Corrigir `scan-gmail-invoices/index.ts`**
+- Alterar URL de `https://api.lovable.dev/v1/chat/completions` para `https://ai.gateway.lovable.dev/v1/chat/completions`
 
-**Parsing AI:** mantém-se com Lovable AI (modelo suportado) em vez do Anthropic direto, eliminando a dependencia do `ANTHROPIC_API_KEY`.
+**2. Criar `supabase/functions/nylas-webhook/index.ts`**
+- Endpoint POST que recebe eventos do Nylas
+- Valida o webhook (Nylas challenge verification)
+- Para eventos `message.created`:
+  - Busca o grant_id da `email_connections` pela conta notificada
+  - Descarrega a mensagem completa via Nylas API
+  - Se tem anexos PDF/imagem, analisa com Lovable AI
+  - Faz match com faturas em falta
+  - Guarda em `inbox_messages` e `attachments`
 
-### Passos de implementacao
-1. Pedir os segredos `NYLAS_API_KEY` e `NYLAS_GRANT_ID`
-2. Reescrever `scan-gmail-invoices` para usar Nylas API
-3. Simplificar `GmailConnectionCard` (remover OAuth flow)
-4. Remover/simplificar `gmail-auth-callback`
-5. Testar o fluxo completo
+**3. Actualizar `supabase/config.toml`**
+- Adicionar entradas para todas as funcoes que faltam:
+  - `scan-gmail-invoices` com `verify_jwt = false`
+  - `gmail-auth-callback` com `verify_jwt = false`
+  - `nylas-webhook` com `verify_jwt = false`
+
+**4. Actualizar `receive-email/index.ts`**
+- Migrar de Anthropic API para Lovable AI Gateway (consistencia)
+
+### Configuracao do Webhook no Nylas Dashboard
+
+Apos implementacao, o utilizador precisa de configurar no Nylas dashboard:
+- **Webhook URL**: `https://uxttxsscvirkgvnltvfd.supabase.co/functions/v1/nylas-webhook`
+- **Trigger**: `message.created`
+
+### Passos de Implementacao
+1. Corrigir URL do AI em `scan-gmail-invoices`
+2. Adicionar funcoes em falta ao `config.toml`
+3. Criar edge function `nylas-webhook`
+4. Migrar `receive-email` para Lovable AI
+5. Deploy e testar
 
