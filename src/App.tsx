@@ -37,6 +37,23 @@ const ProtectedRoute = ({ children }: { children: React.ReactNode }) => {
   return <AppLayout>{children}</AppLayout>;
 };
 
+const OnboardingRoute = () => {
+  const { user, loading } = useAuth();
+  const { companies, loading: companiesLoading } = useCompany();
+
+  if (loading || companiesLoading) {
+    return (
+      <div className="flex min-h-screen items-center justify-center">
+        <div className="h-8 w-8 animate-spin rounded-full border-4 border-primary border-t-transparent" />
+      </div>
+    );
+  }
+
+  if (!user) return <Navigate to="/auth" replace />;
+  if (companies.length > 0) return <Navigate to="/" replace />;
+  return <Onboarding />;
+};
+
 const AppRoutes = () => {
   const { user, loading } = useAuth();
 
@@ -52,7 +69,7 @@ const AppRoutes = () => {
     <Routes>
       <Route path="/auth" element={user ? <Navigate to="/" replace /> : <Auth />} />
       <Route path="/reset-password" element={<ResetPassword />} />
-      <Route path="/onboarding" element={user ? <Onboarding /> : <Navigate to="/auth" replace />} />
+      <Route path="/onboarding" element={<OnboardingRoute />} />
       <Route path="/" element={<ProtectedRoute><Dashboard /></ProtectedRoute>} />
       <Route path="/invoices" element={<ProtectedRoute><Invoices /></ProtectedRoute>} />
       <Route path="/import" element={<ProtectedRoute><ImportInvoices /></ProtectedRoute>} />
