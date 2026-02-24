@@ -21,7 +21,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Button } from "@/components/ui/button";
-import { Search, Filter, Eye, Send, UserSearch, Loader2 } from "lucide-react";
+import { Search, Filter, Eye, Send, UserSearch, Loader2, Mail } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 import { Progress } from "@/components/ui/progress";
 import { format } from "date-fns";
@@ -29,6 +29,7 @@ import { pt } from "date-fns/locale";
 import { cn } from "@/lib/utils";
 import InvoiceContactDialog from "@/components/InvoiceContactDialog";
 import BulkEmailDialog from "@/components/BulkEmailDialog";
+import ScanGmailDialog from "@/components/ScanGmailDialog";
 
 type Invoice = Tables<"invoices">;
 
@@ -57,6 +58,8 @@ const Invoices = () => {
   const [suppliersWithEmail, setSuppliersWithEmail] = useState(0);
   const [lookupRunning, setLookupRunning] = useState(false);
   const [lookupProgress, setLookupProgress] = useState({ done: 0, total: 0 });
+  const [gmailScanOpen, setGmailScanOpen] = useState(false);
+  const [hasGmail, setHasGmail] = useState(false);
   const { toast } = useToast();
 
   const fetchInvoices = async () => {
@@ -128,9 +131,21 @@ const Invoices = () => {
     fetchInvoices();
   };
 
+  const checkGmailConnection = async () => {
+    if (!selectedCompany) return;
+    const { data } = await supabase
+      .from("email_connections")
+      .select("id")
+      .eq("company_id", selectedCompany.id)
+      .eq("provider", "gmail")
+      .maybeSingle();
+    setHasGmail(!!data);
+  };
+
   useEffect(() => {
     fetchInvoices();
     fetchSuppliersWithEmail();
+    checkGmailConnection();
   }, [selectedCompany]);
 
   const filtered = invoices.filter((inv) => {
@@ -168,6 +183,12 @@ const Invoices = () => {
             {lookupRunning ? <Loader2 className="h-4 w-4 animate-spin" /> : <UserSearch className="h-4 w-4" />}
             {lookupRunning ? `A procurar (${lookupProgress.done}/${lookupProgress.total})` : "Procurar Fornecedores"}
           </Button>
+          {hasGmail && (
+            <Button variant="outline" onClick={() => setGmailScanOpen(true)} className="gap-2">
+              <Mail className="h-4 w-4" />
+              Procurar no Gmail
+            </Button>
+          )}
           <Button onClick={() => setBulkOpen(true)} className="gap-2">
             <Send className="h-4 w-4" />
             Pedir Todas em Falta
@@ -255,6 +276,13 @@ const Invoices = () => {
         companyId={selectedCompany.id}
         missingCount={invoices.filter((i) => i.status === "missing").length}
         withEmailCount={suppliersWithEmail}
+        onComplete={fetchInvoices}
+      />
+
+      <ScanGmailDialog
+        open={gmailScanOpen}
+        onClose={() => setGmailScanOpen(false)}
+        companyId={selectedCompany.id}
         onComplete={fetchInvoices}
       />
     </div>
