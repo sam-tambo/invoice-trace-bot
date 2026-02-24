@@ -14,7 +14,7 @@ Deno.serve(async (req) => {
   try {
     const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
     const serviceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
-    const anthropicKey = Deno.env.get("ANTHROPIC_API_KEY");
+    const lovableApiKey = Deno.env.get("LOVABLE_API_KEY");
     const db = createClient(supabaseUrl, serviceKey);
 
     const payload = await req.json();
@@ -51,7 +51,7 @@ Deno.serve(async (req) => {
     let attachmentsParsed = false;
 
     // Process PDF attachments with AI
-    if (attachments.length > 0 && anthropicKey) {
+    if (attachments.length > 0 && lovableApiKey) {
       for (const att of attachments) {
         if (!att.content) continue;
 
@@ -67,29 +67,25 @@ Deno.serve(async (req) => {
           upsert: false,
         });
 
-        // Use AI to extract invoice data
+        // Use Lovable AI to extract invoice data
         if (contentType.includes("pdf") || contentType.includes("image")) {
           try {
-            const aiRes = await fetch("https://api.anthropic.com/v1/messages", {
+            const aiRes = await fetch("https://ai.gateway.lovable.dev/v1/chat/completions", {
               method: "POST",
               headers: {
-                "x-api-key": anthropicKey,
-                "anthropic-version": "2023-06-01",
+                Authorization: `Bearer ${lovableApiKey}`,
                 "Content-Type": "application/json",
               },
               body: JSON.stringify({
-                model: "claude-sonnet-4-20250514",
-                max_tokens: 1024,
+                model: "google/gemini-2.5-flash",
                 messages: [
                   {
                     role: "user",
                     content: [
                       {
-                        type: contentType.includes("image") ? "image" : "document",
-                        source: {
-                          type: "base64",
-                          media_type: contentType,
-                          data: att.content,
+                        type: "image_url",
+                        image_url: {
+                          url: `data:${contentType};base64,${att.content}`,
                         },
                       },
                       {
@@ -104,7 +100,7 @@ Deno.serve(async (req) => {
 
             if (aiRes.ok) {
               const aiData = await aiRes.json();
-              const textContent = aiData.content?.find((c: any) => c.type === "text")?.text || "";
+              const textContent = aiData.choices?.[0]?.message?.content || "";
               const jsonMatch = textContent.match(/\{[\s\S]*\}/);
               if (jsonMatch) {
                 const parsed = JSON.parse(jsonMatch[0]);
