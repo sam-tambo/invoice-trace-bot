@@ -90,7 +90,9 @@ const GmailConnectionCard = () => {
       });
       return;
     }
-    const redirectUri = `${window.location.origin}/settings`;
+    // Use the published URL for redirects so Nylas doesn't get blocked by iframe
+    const publishedOrigin = "https://invoice-trace-bot.lovable.app";
+    const redirectUri = `${publishedOrigin}/settings`;
     // Nylas Hosted Auth URL
     const url = new URL("https://api.us.nylas.com/v3/connect/auth");
     url.searchParams.set("client_id", clientId);
@@ -98,7 +100,12 @@ const GmailConnectionCard = () => {
     url.searchParams.set("response_type", "code");
     url.searchParams.set("access_type", "offline");
     url.searchParams.set("provider", "google");
-    window.location.href = url.toString();
+    // Open in top-level window to avoid iframe restrictions
+    if (window.top) {
+      window.top.location.href = url.toString();
+    } else {
+      window.location.href = url.toString();
+    }
   };
 
   const disconnectGmail = async () => {
