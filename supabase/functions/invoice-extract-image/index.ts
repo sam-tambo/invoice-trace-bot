@@ -6,6 +6,92 @@ const corsHeaders = {
     "authorization, x-client-info, apikey, content-type, x-supabase-client-platform, x-supabase-client-platform-version, x-supabase-client-runtime, x-supabase-client-runtime-version",
 };
 
+const EXTRACTION_PROMPT = `Analisa esta imagem de uma fatura portuguesa. Extrai os seguintes campos e responde APENAS com JSON válido, sem texto adicional:
+
+{
+  "supplier_name": "Nome do fornecedor",
+  "supplier_nif": "NIF do fornecedor (9 dígitos)",
+  "invoice_number": "Número da fatura",
+  "issue_date": "Data de emissão em formato YYYY-MM-DD",
+  "due_date": "Data de vencimento em formato YYYY-MM-DD ou null",
+  "net_amount": 0.00,
+  "vat_amount": 0.00,
+  "amount": 0.00,
+  "confidence": "high/medium/low",
+  "notes": "Notas sobre campos incertos"
+}
+
+Se um campo não for legível, coloca null. O campo "amount" é o total com IVA. O campo "confidence" indica a confiança geral da extração.`;
+
+async function tryAnthropic(image_base64: string, media_type: string): Promise<string | null> {
+  const key = Deno.env.get("ANTHROPIC_API_KEY");
+  if (!key) return null;
+  try {
+    const res = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "x-api-key": key,
+        "anthropic-version": "2023-06-01",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: "claude-sonnet-4-20250514",
+        max_tokens: 2048,
+        messages: [{
+          role: "user",
+          content: [
+            { type: "image", source: { type: "base64", media_type, data: image_base64 } },
+            { type: "text", text: EXTRACTION_PROMPT },
+          ],
+        }],
+      }),
+    });
+    if (!res.ok) {
+      console.error("Anthropic error:", res.status, await res.text());
+      return null;
+    }
+    const data = await res.json();
+    return data.content?.[0]?.text || null;
+  } catch (e) {
+    console.error("Anthropic exception:", e);
+    return null;
+  }
+}
+
+async function tryLovableAI(image_base64: string, media_type: string): Promise<string | null> {
+  const key = Deno.env.get("LOVABLE_API_KEY");
+  if (!key) return null;
+  try {
+    const res = await fetch("https://ai.gateway.lovable.dev/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${key}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: "google/gemini-2.5-flash",
+        max_tokens: 2048,
+        messages: [{
+          role: "user",
+          content: [
+            { type: "image_url", image_url: { url: `data:${media_type};base64,${image_base64}` } },
+            { type: "text", text: EXTRACTION_PROMPT },
+          ],
+        }],
+      }),
+    });
+    if (!res.ok) {
+      console.error("Lovable AI error:", res.status, await res.text());
+      return null;
+    }
+    const data = await res.json();
+    return data.choices?.[0]?.message?.content || null;
+  } catch (e) {
+    console.error("Lovable AI exception:", e);
+    return null;
+  }
+}
+
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") {
     return new Response(null, { headers: corsHeaders });
@@ -22,7 +108,6 @@ Deno.serve(async (req) => {
 
     const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
     const supabaseAnonKey = Deno.env.get("SUPABASE_ANON_KEY")!;
-    const lovableApiKey = Deno.env.get("LOVABLE_API_KEY")!;
 
     const supabase = createClient(supabaseUrl, supabaseAnonKey, {
       global: { headers: { Authorization: authHeader } },
@@ -63,66 +148,29 @@ Deno.serve(async (req) => {
       });
     }
 
-    // Call Lovable AI (Gemini Vision) for extraction
-    const prompt = `Analisa esta imagem de uma fatura portuguesa. Extrai os seguintes campos e responde APENAS com JSON válido, sem texto adicional:
+    const mType = media_type || "image/jpeg";
 
-{
-  "supplier_name": "Nome do fornecedor",
-  "supplier_nif": "NIF do fornecedor (9 dígitos)",
-  "invoice_number": "Número da fatura",
-  "issue_date": "Data de emissão em formato YYYY-MM-DD",
-  "due_date": "Data de vencimento em formato YYYY-MM-DD ou null",
-  "net_amount": 0.00,
-  "vat_amount": 0.00,
-  "amount": 0.00,
-  "confidence": "high/medium/low",
-  "notes": "Notas sobre campos incertos"
-}
+    // Cascade: Anthropic → Lovable AI (Gemini)
+    console.log("Trying Anthropic...");
+    let textContent = await tryAnthropic(image_base64, mType);
+    let provider = "anthropic";
 
-Se um campo não for legível, coloca null. O campo "amount" é o total com IVA. O campo "confidence" indica a confiança geral da extração.`;
+    if (!textContent) {
+      console.log("Anthropic failed, trying Lovable AI...");
+      textContent = await tryLovableAI(image_base64, mType);
+      provider = "lovable-ai";
+    }
 
-    const aiRes = await fetch("https://api.lovable.dev/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        "Authorization": `Bearer ${lovableApiKey}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        model: "google/gemini-2.5-flash",
-        messages: [
-          {
-            role: "user",
-            content: [
-              {
-                type: "image_url",
-                image_url: {
-                  url: `data:${media_type || "image/jpeg"};base64,${image_base64}`,
-                },
-              },
-              {
-                type: "text",
-                text: prompt,
-              },
-            ],
-          },
-        ],
-        max_tokens: 2048,
-      }),
-    });
-
-    if (!aiRes.ok) {
-      const errText = await aiRes.text();
-      console.error("Lovable AI error:", aiRes.status, errText);
-      return new Response(JSON.stringify({ error: "AI extraction failed" }), {
-        status: 500,
+    if (!textContent) {
+      return new Response(JSON.stringify({ error: "All AI providers failed. Please try again later." }), {
+        status: 503,
         headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
     }
 
-    const aiResult = await aiRes.json();
-    const textContent = aiResult.choices?.[0]?.message?.content || "";
-    const jsonMatch = textContent.match(/\{[\s\S]*\}/);
+    console.log("Extraction succeeded via:", provider);
 
+    const jsonMatch = textContent.match(/\{[\s\S]*\}/);
     if (!jsonMatch) {
       console.error("Could not parse AI response:", textContent);
       return new Response(JSON.stringify({ error: "Could not parse AI response" }), {
@@ -135,11 +183,11 @@ Se um campo não for legível, coloca null. O campo "amount" é o total com IVA.
 
     // Upload image to invoice-scans bucket
     const imageBytes = Uint8Array.from(atob(image_base64), (c) => c.charCodeAt(0));
-    const ext = (media_type || "image/jpeg").split("/")[1] || "jpg";
+    const ext = mType.split("/")[1] || "jpg";
     const filePath = `${company_id}/${Date.now()}.${ext}`;
 
     await serviceClient.storage.from("invoice-scans").upload(filePath, imageBytes, {
-      contentType: media_type || "image/jpeg",
+      contentType: mType,
       upsert: false,
     });
 
@@ -178,7 +226,7 @@ Se um campo não for legível, coloca null. O campo "amount" é o total com IVA.
       });
     }
 
-    return new Response(JSON.stringify({ invoice, extracted }), {
+    return new Response(JSON.stringify({ invoice, extracted, provider }), {
       status: 200,
       headers: { ...corsHeaders, "Content-Type": "application/json" },
     });
