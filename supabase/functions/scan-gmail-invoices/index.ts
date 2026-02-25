@@ -255,13 +255,23 @@ Deno.serve(async (req) => {
       msg: any;
       pass: number;
       targetNif: string;
+      targetInvoiceId?: string; // Set when Pass 1 found this email searching for a specific invoice
     }
     const candidates: CandidateMessage[] = [];
 
-    function addCandidate(msg: any, pass: number, targetNif: string) {
-      if (seenMessageIds.has(msg.id)) return;
+    function addCandidate(msg: any, pass: number, targetNif: string, targetInvoiceId?: string) {
+      if (seenMessageIds.has(msg.id)) {
+        // If already seen but now we have a more specific targetInvoiceId, update it
+        if (targetInvoiceId) {
+          const existing = candidates.find(c => c.msg.id === msg.id);
+          if (existing && !existing.targetInvoiceId) {
+            existing.targetInvoiceId = targetInvoiceId;
+          }
+        }
+        return;
+      }
       seenMessageIds.add(msg.id);
-      candidates.push({ msg, pass, targetNif });
+      candidates.push({ msg, pass, targetNif, targetInvoiceId });
     }
 
     // ============================================================
@@ -281,9 +291,11 @@ Deno.serve(async (req) => {
         const msgs = await searchNylasMessages(nylasApiKey, grantId, query, 10);
         if (msgs.length > 0) {
           console.log(`  ✓ Found ${msgs.length} emails for query: "${query}"`);
-          for (const msg of msgs) addCandidate(msg, 1, inv.supplier_nif);
+          for (const msg of msgs) addCandidate(msg, 1, inv.supplier_nif, inv.id);
           foundAny = true;
-          break; // Found results, move to next invoice
+          // Don't break — but if we already found results, skip remaining variations
+          // to save API calls. First hit is usually enough.
+          break;
         } else {
           console.log(`  ✗ No results for: "${query}"`);
         }
@@ -351,20 +363,37 @@ Deno.serve(async (req) => {
       const bodyText = bodyRaw.replace(/<[^>]+>/g, " ");
       const combinedText = `${subject} ${snippet} ${bodyText}`;
 
-      // --- Non-AI text matching ---
+      // --- Direct match from Pass 1 (search-based evidence) ---
       let matchedInvoice: any = null;
       let confidence = "likely";
 
-      for (const [nif, nifInvoices] of invoicesByNif) {
-        const remaining = nifInvoices.filter(i => !matchedInvoiceIds.has(i.id));
-        if (remaining.length === 0) continue;
-        const nums = remaining.map(i => i.invoice_number);
-        const foundNum = findInvoiceNumberInText(combinedText, nums);
-        if (foundNum) {
-          matchedInvoice = remaining.find(i => i.invoice_number === foundNum);
-          confidence = "exact_number";
-          break;
+      // KEY FIX: If Pass 1 found this email by searching for a specific invoice number,
+      // that IS the match — we don't need to find the number in the email body text.
+      if (candidate.targetInvoiceId && !matchedInvoiceIds.has(candidate.targetInvoiceId)) {
+        matchedInvoice = invoices.find(i => i.id === candidate.targetInvoiceId);
+        if (matchedInvoice) {
+          confidence = "search_match";
+          console.log(`  → Direct match via search: ${matchedInvoice.invoice_number}`);
         }
+      }
+
+      // Text-based matching (for Pass 2/3 candidates or as upgrade to "exact_number")
+      if (!matchedInvoice) {
+        for (const [nif, nifInvoices] of invoicesByNif) {
+          const remaining = nifInvoices.filter(i => !matchedInvoiceIds.has(i.id));
+          if (remaining.length === 0) continue;
+          const nums = remaining.map(i => i.invoice_number);
+          const foundNum = findInvoiceNumberInText(combinedText, nums);
+          if (foundNum) {
+            matchedInvoice = remaining.find(i => i.invoice_number === foundNum);
+            confidence = "exact_number";
+            break;
+          }
+        }
+      } else {
+        // Even if we have a search match, check if the number appears in text for stronger confidence
+        const foundNum = findInvoiceNumberInText(combinedText, [matchedInvoice.invoice_number]);
+        if (foundNum) confidence = "exact_number";
       }
 
       // Check attachment filenames
