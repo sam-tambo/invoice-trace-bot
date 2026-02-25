@@ -9,7 +9,8 @@ import {
   DialogDescription,
 } from "@/components/ui/dialog";
 import { useToast } from "@/hooks/use-toast";
-import { Loader2, Mail, CheckCircle2 } from "lucide-react";
+import { Loader2, Mail, CheckCircle2, AlertTriangle } from "lucide-react";
+import { Badge } from "@/components/ui/badge";
 
 interface Props {
   open: boolean;
@@ -17,6 +18,13 @@ interface Props {
   companyId: string;
   onComplete: () => void;
 }
+
+const CONFIDENCE_LABELS: Record<string, { label: string; variant: "default" | "secondary" | "outline" | "destructive" }> = {
+  exact_number: { label: "Número exacto", variant: "default" },
+  ai_parsed: { label: "IA", variant: "secondary" },
+  amount_match: { label: "Valor", variant: "outline" },
+  likely: { label: "Provável", variant: "outline" },
+};
 
 const ScanGmailDialog = ({ open, onClose, companyId, onComplete }: Props) => {
   const { toast } = useToast();
@@ -83,6 +91,14 @@ const ScanGmailDialog = ({ open, onClose, companyId, onComplete }: Props) => {
                 <CheckCircle2 className="h-5 w-5 text-success" />
                 <span className="font-medium">Pesquisa concluída</span>
               </div>
+
+              {results.warning && (
+                <div className="flex items-start gap-2 rounded-lg border border-yellow-200 bg-yellow-50 p-3 text-xs text-yellow-800 dark:border-yellow-800 dark:bg-yellow-950 dark:text-yellow-200">
+                  <AlertTriangle className="h-4 w-4 mt-0.5 shrink-0" />
+                  <span>{results.warning}</span>
+                </div>
+              )}
+
               <div className="grid grid-cols-2 gap-3 text-sm">
                 <div className="rounded-lg border p-3 text-center">
                   <p className="text-2xl font-bold">{results.emails_found}</p>
@@ -96,11 +112,22 @@ const ScanGmailDialog = ({ open, onClose, companyId, onComplete }: Props) => {
               {results.details?.length > 0 && (
                 <div className="space-y-1">
                   <p className="text-xs font-medium text-muted-foreground">Detalhes:</p>
-                  {results.details.map((d: any, i: number) => (
-                    <div key={i} className="text-xs rounded border p-2">
-                      Fatura <span className="font-mono font-medium">{d.invoice_number}</span> — {d.filename}
-                    </div>
-                  ))}
+                  {results.details.map((d: any, i: number) => {
+                    const conf = CONFIDENCE_LABELS[d.confidence] || CONFIDENCE_LABELS.likely;
+                    return (
+                      <div key={i} className="flex items-center justify-between text-xs rounded border p-2">
+                        <span>
+                          Fatura <span className="font-mono font-medium">{d.invoice_number}</span>
+                          {d.filename && d.filename !== "email_match" && (
+                            <span className="text-muted-foreground"> — {d.filename}</span>
+                          )}
+                        </span>
+                        <Badge variant={conf.variant} className="text-[10px] ml-2">
+                          {conf.label}
+                        </Badge>
+                      </div>
+                    );
+                  })}
                 </div>
               )}
               <Button variant="outline" onClick={handleClose} className="w-full">

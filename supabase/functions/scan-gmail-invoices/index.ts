@@ -7,9 +7,41 @@ const corsHeaders = {
 };
 
 const NYLAS_BASE = "https://api.us.nylas.com/v3";
+const MAX_ATTACHMENT_SIZE = 5 * 1024 * 1024; // 5MB
 
-async function searchNylasMessages(apiKey: string, grantId: string, query: string, requireAttachments = false): Promise<any[]> {
-  const url = `${NYLAS_BASE}/grants/${grantId}/messages?search_query_native=${encodeURIComponent(query)}${requireAttachments ? '&has_attachments=true' : ''}&limit=15`;
+// --- Helpers ---
+
+function uint8ToBase64(bytes: Uint8Array): string {
+  let binary = "";
+  for (let i = 0; i < bytes.length; i += 8192) {
+    const chunk = bytes.subarray(i, Math.min(i + 8192, bytes.length));
+    binary += String.fromCharCode(...chunk);
+  }
+  return btoa(binary);
+}
+
+function normalizeInvoiceNumber(num: string): string {
+  return num.replace(/[\s\-\/\.]/g, "").toUpperCase();
+}
+
+function findInvoiceNumberInText(text: string, invoiceNumbers: string[]): string | null {
+  if (!text) return null;
+  const upperText = text.toUpperCase();
+  for (const num of invoiceNumbers) {
+    // Try exact match first
+    if (upperText.includes(num.toUpperCase())) return num;
+    // Try normalized match (ignore separators)
+    const normalized = normalizeInvoiceNumber(num);
+    // Build a regex that allows optional separators between chars of the core number part
+    if (normalized.length > 3 && upperText.replace(/[\s\-\/\.]/g, "").includes(normalized)) {
+      return num;
+    }
+  }
+  return null;
+}
+
+async function searchNylasMessages(apiKey: string, grantId: string, query: string, limit = 15): Promise<any[]> {
+  const url = `${NYLAS_BASE}/grants/${grantId}/messages?search_query_native=${encodeURIComponent(query)}&limit=${limit}`;
   const res = await fetch(url, {
     headers: { Authorization: `Bearer ${apiKey}`, Accept: "application/json" },
   });
@@ -42,6 +74,8 @@ async function downloadNylasAttachment(apiKey: string, grantId: string, attachme
   return await res.arrayBuffer();
 }
 
+// --- Main handler ---
+
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") {
     return new Response(null, { headers: corsHeaders });
@@ -58,8 +92,7 @@ Deno.serve(async (req) => {
     const authHeader = req.headers.get("Authorization");
     if (!authHeader?.startsWith("Bearer ")) {
       return new Response(JSON.stringify({ error: "Unauthorized" }), {
-        status: 401,
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
+        status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
     }
 
@@ -68,24 +101,21 @@ Deno.serve(async (req) => {
     });
     const { data: { user: authUser }, error: userError } = await supabase.auth.getUser();
     if (userError || !authUser) {
-      console.error("Auth error:", userError);
       return new Response(JSON.stringify({ error: "Unauthorized" }), {
-        status: 401,
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
+        status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
     }
 
     const { company_id } = await req.json();
     if (!company_id) {
       return new Response(JSON.stringify({ error: "Missing company_id" }), {
-        status: 400,
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
+        status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
     }
 
     const db = createClient(supabaseUrl, serviceKey);
 
-    // Get gmail connection — grant_id is stored in access_token field
+    // Get email connection
     const { data: conn } = await db
       .from("email_connections")
       .select("*")
@@ -99,7 +129,7 @@ Deno.serve(async (req) => {
       );
     }
 
-    const grantId = conn.access_token; // grant_id stored here
+    const grantId = conn.access_token;
 
     // Get missing/contacted invoices
     const { data: invoices } = await db
@@ -115,7 +145,7 @@ Deno.serve(async (req) => {
       );
     }
 
-    // Get supplier emails
+    // Get supplier info
     const supplierNifs = [...new Set(invoices.map((i) => i.supplier_nif).filter(Boolean))];
     const { data: suppliers } = await db
       .from("suppliers")
@@ -124,150 +154,181 @@ Deno.serve(async (req) => {
       .in("nif", supplierNifs);
 
     const supplierMap = new Map<string, any>();
-    for (const s of suppliers || []) {
-      supplierMap.set(s.nif, s);
-    }
-
-    let totalEmailsFound = 0;
-    let totalMatched = 0;
-    const results: any[] = [];
+    for (const s of suppliers || []) supplierMap.set(s.nif, s);
 
     // Group invoices by supplier NIF
     const invoicesByNif = new Map<string, typeof invoices>();
     for (const inv of invoices) {
       if (!inv.supplier_nif) continue;
-      if (!invoicesByNif.has(inv.supplier_nif)) {
-        invoicesByNif.set(inv.supplier_nif, []);
-      }
+      if (!invoicesByNif.has(inv.supplier_nif)) invoicesByNif.set(inv.supplier_nif, []);
       invoicesByNif.get(inv.supplier_nif)!.push(inv);
     }
 
+    // All invoice numbers for text matching
+    const allInvoiceNumbers = invoices.map(i => i.invoice_number).filter(Boolean);
+
+    let totalEmailsFound = 0;
+    let totalMatched = 0;
+    const results: any[] = [];
+    const matchedInvoiceIds = new Set<string>();
+    const seenMessageIds = new Set<string>();
+    let aiCreditsExhausted = false;
+
+    // ============================================================
+    // MULTI-PASS SEARCH STRATEGY
+    // ============================================================
+
+    // Collect all unique messages across passes, deduplicated
+    interface CandidateMessage {
+      msg: any;
+      pass: number; // 1 = exact number, 2 = supplier email, 3 = supplier name
+      targetNif: string;
+    }
+    const candidates: CandidateMessage[] = [];
+
+    // --- PASS 1: Search by exact invoice number (highest confidence) ---
+    // Search each invoice number directly — most precise
+    const uniqueNumbers = [...new Set(allInvoiceNumbers)];
+    // Batch invoice numbers in groups to avoid too many API calls
+    const numberBatches: string[][] = [];
+    for (let i = 0; i < uniqueNumbers.length; i += 5) {
+      numberBatches.push(uniqueNumbers.slice(i, i + 5));
+    }
+
+    for (const batch of numberBatches) {
+      // Use OR to search for any of the invoice numbers
+      const query = batch.map(n => `"${n}"`).join(" OR ");
+      console.log(`Pass 1 - Searching by invoice numbers: ${query.substring(0, 120)}...`);
+      const msgs = await searchNylasMessages(nylasApiKey, grantId, query, 10);
+      for (const msg of msgs) {
+        if (!seenMessageIds.has(msg.id)) {
+          seenMessageIds.add(msg.id);
+          // Determine which NIF this might belong to by checking content
+          const text = `${msg.subject || ""} ${msg.snippet || ""}`;
+          for (const [nif, nifInvoices] of invoicesByNif) {
+            const nums = nifInvoices.map(i => i.invoice_number);
+            if (findInvoiceNumberInText(text, nums)) {
+              candidates.push({ msg, pass: 1, targetNif: nif });
+              break;
+            }
+          }
+          // If no NIF match from text, still add as generic candidate
+          if (!candidates.find(c => c.msg.id === msg.id)) {
+            candidates.push({ msg, pass: 1, targetNif: "" });
+          }
+        }
+      }
+    }
+
+    // --- PASS 2: Search by supplier email + has:attachment ---
     for (const [nif, nifInvoices] of invoicesByNif) {
       const supplier = supplierMap.get(nif);
+      if (!supplier?.email) continue;
 
-      // Build search query
-      // Build search query — include invoice numbers + broader terms
-      const queryParts: string[] = [];
-      if (supplier?.email) {
-        queryParts.push(`from:${supplier.email}`);
+      const query = `from:${supplier.email} has:attachment`;
+      console.log(`Pass 2 - Searching by supplier email for NIF ${nif}: ${query}`);
+      const msgs = await searchNylasMessages(nylasApiKey, grantId, query, 10);
+      for (const msg of msgs) {
+        if (!seenMessageIds.has(msg.id)) {
+          seenMessageIds.add(msg.id);
+          candidates.push({ msg, pass: 2, targetNif: nif });
+        }
       }
-      // Add supplier name for broader matching
-      const supplierName = supplier?.name || supplier?.legal_name;
-      if (supplierName && !supplier?.email) {
-        queryParts.push(supplierName);
+    }
+
+    // --- PASS 3: Search by supplier name + invoice keywords ---
+    for (const [nif, nifInvoices] of invoicesByNif) {
+      const supplier = supplierMap.get(nif);
+      if (supplier?.email) continue; // Already searched in pass 2
+      const name = supplier?.name || supplier?.legal_name || nifInvoices[0]?.supplier_name;
+      if (!name) continue;
+
+      const query = `${name} fatura OR invoice OR recibo has:attachment`;
+      console.log(`Pass 3 - Searching by supplier name for NIF ${nif}: ${query.substring(0, 100)}`);
+      const msgs = await searchNylasMessages(nylasApiKey, grantId, query, 5);
+      for (const msg of msgs) {
+        if (!seenMessageIds.has(msg.id)) {
+          seenMessageIds.add(msg.id);
+          candidates.push({ msg, pass: 3, targetNif: nif });
+        }
       }
-      // Add invoice numbers to search body text
-      const invoiceNumbers = nifInvoices.map(i => i.invoice_number).filter(Boolean);
-      if (invoiceNumbers.length > 0) {
-        queryParts.push(`{${invoiceNumbers.join(" ")}}`);
+    }
+
+    totalEmailsFound = candidates.length;
+    console.log(`Total candidate emails found across all passes: ${totalEmailsFound}`);
+
+    // ============================================================
+    // PROCESS CANDIDATES — non-AI matching first, then AI fallback
+    // ============================================================
+
+    for (const candidate of candidates) {
+      const { msg, pass, targetNif } = candidate;
+
+      // Get full message for attachments and body
+      const fullMsg = msg.attachments ? msg : await getNylasMessage(nylasApiKey, grantId, msg.id);
+      if (!fullMsg) continue;
+
+      const subject = fullMsg.subject || "";
+      const snippet = fullMsg.snippet || msg.snippet || "";
+      const bodyText = fullMsg.body?.text || fullMsg.body || "";
+      const combinedText = `${subject} ${snippet} ${bodyText}`;
+
+      // --- Step A: Non-AI text matching (fast, free, most common case) ---
+      let matchedInvoice: any = null;
+      let confidence = "likely";
+
+      // Check all NIFs' invoices against this email's text
+      for (const [nif, nifInvoices] of invoicesByNif) {
+        const remaining = nifInvoices.filter(i => !matchedInvoiceIds.has(i.id));
+        if (remaining.length === 0) continue;
+        const nums = remaining.map(i => i.invoice_number);
+        const foundNum = findInvoiceNumberInText(combinedText, nums);
+        if (foundNum) {
+          matchedInvoice = remaining.find(i => i.invoice_number === foundNum);
+          confidence = "exact_number";
+          break;
+        }
       }
-      // Add common invoice terms
-      queryParts.push("fatura OR invoice OR factura OR recibo");
 
-      if (queryParts.length === 0) continue;
-      const query = queryParts.join(" ");
-      console.log(`Searching Nylas for NIF ${nif}: ${query}`);
+      // Also check attachment filenames for invoice numbers
+      const attachments = (fullMsg.attachments || []).filter((att: any) => {
+        const ct = (att.content_type || "").toLowerCase();
+        return ct.includes("pdf") || ct.includes("image");
+      });
 
-      const messages = await searchNylasMessages(nylasApiKey, grantId, query);
-      totalEmailsFound += messages.length;
-
-      for (const msg of messages.slice(0, 5)) {
-        // Get full message with attachments
-        const fullMsg = msg.attachments ? msg : await getNylasMessage(nylasApiKey, grantId, msg.id);
-        if (!fullMsg) continue;
-
-        const attachments = (fullMsg.attachments || []).filter((att: any) => {
-          const ct = (att.content_type || "").toLowerCase();
-          return ct.includes("pdf") || ct.includes("image");
-        });
-
+      if (!matchedInvoice) {
         for (const att of attachments) {
-          if (!lovableApiKey) continue;
-
-          const fileData = await downloadNylasAttachment(nylasApiKey, grantId, att.id, msg.id);
-          if (!fileData) continue;
-
-          const fileBuffer = new Uint8Array(fileData);
-          const b64Data = btoa(String.fromCharCode(...fileBuffer));
-
-          // Parse with Lovable AI (Gemini)
-          try {
-            const aiRes = await fetch("https://ai.gateway.lovable.dev/v1/chat/completions", {
-              method: "POST",
-              headers: {
-                Authorization: `Bearer ${lovableApiKey}`,
-                "Content-Type": "application/json",
-              },
-              body: JSON.stringify({
-                model: "google/gemini-2.5-flash",
-                messages: [
-                  {
-                    role: "user",
-                    content: [
-                      {
-                        type: "image_url",
-                        image_url: {
-                          url: `data:${att.content_type};base64,${b64Data}`,
-                        },
-                      },
-                      {
-                        type: "text",
-                        text: `Analisa este documento e diz-me se é uma fatura. Se sim, extrai: invoice_number, amount (total com IVA), net_amount, vat_amount, issue_date (YYYY-MM-DD), due_date (YYYY-MM-DD), supplier_nif. Responde APENAS em JSON: {"is_invoice": true/false, "invoice_number": "...", "amount": 0, "net_amount": 0, "vat_amount": 0, "issue_date": "...", "due_date": "...", "supplier_nif": "..."}`,
-                      },
-                    ],
-                  },
-                ],
-              }),
-            });
-
-            if (!aiRes.ok) {
-              console.error("AI parse error:", aiRes.status, await aiRes.text());
-              continue;
+          const filename = att.filename || "";
+          for (const [nif, nifInvoices] of invoicesByNif) {
+            const remaining = nifInvoices.filter(i => !matchedInvoiceIds.has(i.id));
+            const foundNum = findInvoiceNumberInText(filename, remaining.map(i => i.invoice_number));
+            if (foundNum) {
+              matchedInvoice = remaining.find(i => i.invoice_number === foundNum);
+              confidence = "exact_number";
+              break;
             }
+          }
+          if (matchedInvoice) break;
+        }
+      }
 
-            const aiData = await aiRes.json();
-            const textContent = aiData.choices?.[0]?.message?.content || "";
-            const jsonMatch = textContent.match(/\{[\s\S]*\}/);
-            if (!jsonMatch) continue;
-
-            const parsed = JSON.parse(jsonMatch[0]);
-            if (!parsed.is_invoice) continue;
-
-            // Try to match
-            let matchedInvoice = nifInvoices.find(
-              (inv) => parsed.invoice_number && inv.invoice_number === parsed.invoice_number
-            );
-            if (!matchedInvoice && parsed.amount) {
-              matchedInvoice = nifInvoices.find(
-                (inv) => inv.amount && Math.abs(Number(inv.amount) - parsed.amount) < 0.01
-              );
-            }
-            if (!matchedInvoice) {
-              matchedInvoice = nifInvoices[0];
-            }
-
-            if (matchedInvoice) {
-              // Upload to storage
-              const filePath = `${company_id}/${nif}/${Date.now()}_${att.filename}`;
+      // If we found a text-based match, upload the first PDF/image attachment and mark as received
+      if (matchedInvoice && !matchedInvoiceIds.has(matchedInvoice.id)) {
+        const att = attachments[0];
+        if (att) {
+          // Skip oversized attachments
+          if (att.size && att.size > MAX_ATTACHMENT_SIZE) {
+            console.log(`Skipping large attachment ${att.filename} (${att.size} bytes)`);
+          } else {
+            const fileData = await downloadNylasAttachment(nylasApiKey, grantId, att.id, msg.id);
+            if (fileData) {
+              const fileBuffer = new Uint8Array(fileData);
+              const filePath = `${company_id}/${matchedInvoice.supplier_nif}/${Date.now()}_${att.filename}`;
               await db.storage.from("invoice-files").upload(filePath, fileBuffer, {
-                contentType: att.content_type,
-                upsert: false,
+                contentType: att.content_type, upsert: false,
               });
 
-              // Update invoice
-              await db
-                .from("invoices")
-                .update({
-                  status: "received",
-                  amount: parsed.amount || undefined,
-                  net_amount: parsed.net_amount || undefined,
-                  vat_amount: parsed.vat_amount || undefined,
-                  issue_date: parsed.issue_date || undefined,
-                  due_date: parsed.due_date || undefined,
-                })
-                .eq("id", matchedInvoice.id);
-
-              // Save attachment
+              await db.from("invoices").update({ status: "received" }).eq("id", matchedInvoice.id);
               await db.from("attachments").insert({
                 company_id,
                 invoice_id: matchedInvoice.id,
@@ -278,37 +339,167 @@ Deno.serve(async (req) => {
                 uploaded_by: "00000000-0000-0000-0000-000000000000",
               });
 
+              matchedInvoiceIds.add(matchedInvoice.id);
               totalMatched++;
               results.push({
                 invoice_number: matchedInvoice.invoice_number,
-                supplier_nif: nif,
+                supplier_nif: matchedInvoice.supplier_nif,
                 filename: att.filename,
+                confidence,
               });
-
-              const idx = nifInvoices.indexOf(matchedInvoice);
-              if (idx > -1) nifInvoices.splice(idx, 1);
+              continue; // Move to next candidate
             }
-          } catch (aiErr) {
-            console.error("AI parse error:", aiErr);
           }
+        }
+        // Even without attachment download, mark the text match
+        matchedInvoiceIds.add(matchedInvoice.id);
+        totalMatched++;
+        results.push({
+          invoice_number: matchedInvoice.invoice_number,
+          supplier_nif: matchedInvoice.supplier_nif,
+          filename: "email_match",
+          confidence,
+        });
+        continue;
+      }
+
+      // --- Step B: AI-based parsing (fallback for unmatched emails with attachments) ---
+      if (aiCreditsExhausted || !lovableApiKey || attachments.length === 0) continue;
+
+      // Only try AI for pass 1 and 2 candidates (higher relevance)
+      if (pass === 3) continue;
+
+      // Determine which NIFs to try matching against
+      const targetNifs = targetNif ? [targetNif] : [...invoicesByNif.keys()];
+
+      for (const att of attachments.slice(0, 2)) {
+        if (att.size && att.size > MAX_ATTACHMENT_SIZE) {
+          console.log(`Skipping large attachment for AI: ${att.filename} (${att.size} bytes)`);
+          continue;
+        }
+
+        const fileData = await downloadNylasAttachment(nylasApiKey, grantId, att.id, msg.id);
+        if (!fileData) continue;
+
+        const fileBuffer = new Uint8Array(fileData);
+        const b64Data = uint8ToBase64(fileBuffer);
+
+        try {
+          const aiRes = await fetch("https://ai.gateway.lovable.dev/v1/chat/completions", {
+            method: "POST",
+            headers: {
+              Authorization: `Bearer ${lovableApiKey}`,
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({
+              model: "google/gemini-2.5-flash",
+              messages: [{
+                role: "user",
+                content: [
+                  { type: "image_url", image_url: { url: `data:${att.content_type};base64,${b64Data}` } },
+                  { type: "text", text: `Analisa este documento e diz-me se é uma fatura. Se sim, extrai: invoice_number, amount (total com IVA), net_amount, vat_amount, issue_date (YYYY-MM-DD), due_date (YYYY-MM-DD), supplier_nif. Responde APENAS em JSON: {"is_invoice": true/false, "invoice_number": "...", "amount": 0, "net_amount": 0, "vat_amount": 0, "issue_date": "...", "due_date": "...", "supplier_nif": "..."}` },
+                ],
+              }],
+            }),
+          });
+
+          if (!aiRes.ok) {
+            const errText = await aiRes.text();
+            console.error("AI parse error:", aiRes.status, errText);
+            if (aiRes.status === 402) {
+              aiCreditsExhausted = true;
+              console.warn("AI credits exhausted — switching to non-AI matching only for remaining emails.");
+              break;
+            }
+            continue;
+          }
+
+          const aiData = await aiRes.json();
+          const textContent = aiData.choices?.[0]?.message?.content || "";
+          const jsonMatch = textContent.match(/\{[\s\S]*\}/);
+          if (!jsonMatch) continue;
+
+          const parsed = JSON.parse(jsonMatch[0]);
+          if (!parsed.is_invoice) continue;
+
+          // Try matching by invoice number first, then amount
+          let aiMatchedInvoice: any = null;
+          let aiConfidence = "ai_parsed";
+
+          for (const nif of targetNifs) {
+            const remaining = (invoicesByNif.get(nif) || []).filter(i => !matchedInvoiceIds.has(i.id));
+            // Exact number match
+            aiMatchedInvoice = remaining.find(i =>
+              parsed.invoice_number && normalizeInvoiceNumber(i.invoice_number) === normalizeInvoiceNumber(parsed.invoice_number)
+            );
+            if (aiMatchedInvoice) { aiConfidence = "exact_number"; break; }
+            // Amount match
+            if (parsed.amount) {
+              aiMatchedInvoice = remaining.find(i =>
+                i.amount && Math.abs(Number(i.amount) - parsed.amount) < 0.01
+              );
+              if (aiMatchedInvoice) { aiConfidence = "amount_match"; break; }
+            }
+          }
+
+          if (aiMatchedInvoice && !matchedInvoiceIds.has(aiMatchedInvoice.id)) {
+            const filePath = `${company_id}/${aiMatchedInvoice.supplier_nif}/${Date.now()}_${att.filename}`;
+            await db.storage.from("invoice-files").upload(filePath, fileBuffer, {
+              contentType: att.content_type, upsert: false,
+            });
+
+            await db.from("invoices").update({
+              status: "received",
+              amount: parsed.amount || undefined,
+              net_amount: parsed.net_amount || undefined,
+              vat_amount: parsed.vat_amount || undefined,
+              issue_date: parsed.issue_date || undefined,
+              due_date: parsed.due_date || undefined,
+            }).eq("id", aiMatchedInvoice.id);
+
+            await db.from("attachments").insert({
+              company_id,
+              invoice_id: aiMatchedInvoice.id,
+              file_name: att.filename,
+              file_path: filePath,
+              file_type: att.content_type,
+              file_size: att.size || fileBuffer.length,
+              uploaded_by: "00000000-0000-0000-0000-000000000000",
+            });
+
+            matchedInvoiceIds.add(aiMatchedInvoice.id);
+            totalMatched++;
+            results.push({
+              invoice_number: aiMatchedInvoice.invoice_number,
+              supplier_nif: aiMatchedInvoice.supplier_nif,
+              filename: att.filename,
+              confidence: aiConfidence,
+            });
+            break; // Got a match from this message, move to next
+          }
+        } catch (aiErr) {
+          console.error("AI parse error:", aiErr);
         }
       }
     }
 
-    return new Response(
-      JSON.stringify({
-        success: true,
-        emails_found: totalEmailsFound,
-        invoices_matched: totalMatched,
-        details: results,
-      }),
-      { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-    );
+    const response: any = {
+      success: true,
+      emails_found: totalEmailsFound,
+      invoices_matched: totalMatched,
+      details: results,
+    };
+    if (aiCreditsExhausted) {
+      response.warning = "Créditos de IA esgotados. Algumas faturas foram correspondidas apenas por número no texto do email.";
+    }
+
+    return new Response(JSON.stringify(response), {
+      status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" },
+    });
   } catch (err) {
     console.error("scan-gmail-invoices error:", err);
     return new Response(JSON.stringify({ error: String(err) }), {
-      status: 500,
-      headers: { ...corsHeaders, "Content-Type": "application/json" },
+      status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" },
     });
   }
 });
