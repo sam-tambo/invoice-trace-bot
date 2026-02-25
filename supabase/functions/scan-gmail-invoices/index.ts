@@ -7,7 +7,7 @@ const corsHeaders = {
 };
 
 const NYLAS_BASE = "https://api.us.nylas.com/v3";
-const MAX_ATTACHMENT_SIZE = 5 * 1024 * 1024; // 5MB
+const MAX_ATTACHMENT_SIZE = 5 * 1024 * 1024;
 
 // --- Helpers ---
 
@@ -24,40 +24,99 @@ function normalizeInvoiceNumber(num: string): string {
   return num.replace(/[\s\-\/\.]/g, "").toUpperCase();
 }
 
-/** Extract the "core" part of an invoice number: strip the doc-type prefix (FT, FS, FR, NC, ND, etc.)
- *  and any leading series code, returning the most distinctive numeric/alphanumeric identifier.
- *  E.g. "FT PT2025/870578" -> ["PT2025/870578", "870578"]
- *       "FS 1A2501/10396"  -> ["1A2501/10396", "10396"]
- *       "FR IDSM125/20577986" -> ["IDSM125/20577986", "20577986"]
+/**
+ * Generate MANY search query variations for a single invoice number.
+ * The goal: at least ONE of these MUST match what Gmail indexes.
+ * 
+ * For "FT PT2025/870578" we generate:
+ *  - "FT PT2025/870578"           (exact full)
+ *  - "PT2025/870578"              (without doc-type prefix)
+ *  - "870578"                      (just the number after last /)
+ *  - "PT2025 870578"              (slash replaced with space)
+ *  - "FT PT2025 870578"           (full with slash→space)  
+ *  - "\"PT2025/870578\""          (quoted exact)
+ *  - "\"870578\""                 (quoted suffix)
  */
-function extractSearchTerms(invoiceNumber: string): string[] {
-  const terms: string[] = [invoiceNumber]; // always include full number
-  // Strip document type prefix (FT, FS, FR, NC, ND, FP, VD, etc.) + optional space
-  const withoutPrefix = invoiceNumber.replace(/^(FT|FS|FR|NC|ND|FP|VD|RC|GR|GT|GA|GC|GD)\s+/i, "");
-  if (withoutPrefix !== invoiceNumber) terms.push(withoutPrefix);
-  // Extract just the number after the last "/"
-  const lastSlash = invoiceNumber.lastIndexOf("/");
-  if (lastSlash !== -1) {
-    const suffix = invoiceNumber.substring(lastSlash + 1);
-    if (suffix.length >= 4) terms.push(suffix); // only if meaningful (4+ chars)
+function generateSearchQueries(invoiceNumber: string): string[] {
+  const queries: string[] = [];
+  const trimmed = invoiceNumber.trim();
+  
+  // 1. Full invoice number as-is
+  queries.push(trimmed);
+  
+  // 2. Without document type prefix
+  const withoutPrefix = trimmed.replace(/^(FT|FS|FR|NC|ND|FP|VD|RC|GR|GT|GA|GC|GD)\s+/i, "");
+  if (withoutPrefix !== trimmed) {
+    queries.push(withoutPrefix);
   }
-  // Also try the series/number part (e.g. "A/856709073" from "FT A/856709073")
-  const seriesMatch = invoiceNumber.match(/([A-Z0-9]+\/\d{4,})/i);
-  if (seriesMatch && !terms.includes(seriesMatch[1])) terms.push(seriesMatch[1]);
-  return [...new Set(terms)];
+  
+  // 3. Number after last slash (the most unique part)
+  const lastSlash = trimmed.lastIndexOf("/");
+  if (lastSlash !== -1) {
+    const suffix = trimmed.substring(lastSlash + 1);
+    if (suffix.length >= 4) {
+      queries.push(suffix);
+    }
+  }
+  
+  // 4. Replace slashes with spaces (Gmail may tokenize on /)
+  const spacified = trimmed.replace(/\//g, " ");
+  if (spacified !== trimmed) queries.push(spacified);
+  
+  const spacifiedNoPrefix = withoutPrefix.replace(/\//g, " ");
+  if (spacifiedNoPrefix !== withoutPrefix && spacifiedNoPrefix !== spacified) {
+    queries.push(spacifiedNoPrefix);
+  }
+
+  // 5. Quoted versions for exact matching
+  queries.push(`"${withoutPrefix}"`);
+  if (lastSlash !== -1) {
+    const suffix = trimmed.substring(lastSlash + 1);
+    if (suffix.length >= 4) queries.push(`"${suffix}"`);
+  }
+  
+  // 6. Series/number pattern e.g. "A/856709073"
+  const seriesMatch = trimmed.match(/([A-Z0-9]+\/\d{4,})/i);
+  if (seriesMatch) {
+    queries.push(seriesMatch[1]);
+    queries.push(`"${seriesMatch[1]}"`);
+  }
+
+  // 7. Extract ALL numeric sequences of 5+ digits (very likely to be unique identifiers)
+  const numericParts = trimmed.match(/\d{5,}/g);
+  if (numericParts) {
+    for (const np of numericParts) {
+      if (!queries.includes(np)) queries.push(np);
+    }
+  }
+
+  // Deduplicate
+  return [...new Set(queries)];
 }
 
 function findInvoiceNumberInText(text: string, invoiceNumbers: string[]): string | null {
   if (!text) return null;
   const upperText = text.toUpperCase();
+  const normalizedText = upperText.replace(/[\s\-\/\.]/g, "");
+  
   for (const num of invoiceNumbers) {
-    // Try exact match first
+    // Exact match
     if (upperText.includes(num.toUpperCase())) return num;
-    // Try normalized match (ignore separators)
+    // Normalized match (ignore separators)
     const normalized = normalizeInvoiceNumber(num);
-    // Build a regex that allows optional separators between chars of the core number part
-    if (normalized.length > 3 && upperText.replace(/[\s\-\/\.]/g, "").includes(normalized)) {
-      return num;
+    if (normalized.length > 3 && normalizedText.includes(normalized)) return num;
+    // Also check the suffix after last /
+    const lastSlash = num.lastIndexOf("/");
+    if (lastSlash !== -1) {
+      const suffix = num.substring(lastSlash + 1);
+      if (suffix.length >= 5 && upperText.includes(suffix.toUpperCase())) return num;
+    }
+    // Check all long numeric sequences from the invoice number
+    const nums = num.match(/\d{5,}/g);
+    if (nums) {
+      for (const n of nums) {
+        if (upperText.includes(n)) return num;
+      }
     }
   }
   return null;
@@ -69,7 +128,8 @@ async function searchNylasMessages(apiKey: string, grantId: string, query: strin
     headers: { Authorization: `Bearer ${apiKey}`, Accept: "application/json" },
   });
   if (!res.ok) {
-    console.error("Nylas search error:", res.status, await res.text());
+    const errText = await res.text();
+    console.error(`Nylas search error for "${query}":`, res.status, errText);
     return [];
   }
   const data = await res.json();
@@ -111,7 +171,6 @@ Deno.serve(async (req) => {
     const nylasApiKey = Deno.env.get("NYLAS_API_KEY")!;
     const anthropicApiKey = Deno.env.get("ANTHROPIC_API_KEY");
 
-    // Auth
     const authHeader = req.headers.get("Authorization");
     if (!authHeader?.startsWith("Bearer ")) {
       return new Response(JSON.stringify({ error: "Unauthorized" }), {
@@ -138,7 +197,6 @@ Deno.serve(async (req) => {
 
     const db = createClient(supabaseUrl, serviceKey);
 
-    // Get email connection
     const { data: conn } = await db
       .from("email_connections")
       .select("*")
@@ -154,7 +212,6 @@ Deno.serve(async (req) => {
 
     const grantId = conn.access_token;
 
-    // Get missing/contacted invoices
     const { data: invoices } = await db
       .from("invoices")
       .select("id, invoice_number, supplier_nif, supplier_name, amount, supplier_id")
@@ -168,7 +225,6 @@ Deno.serve(async (req) => {
       );
     }
 
-    // Get supplier info
     const supplierNifs = [...new Set(invoices.map((i) => i.supplier_nif).filter(Boolean))];
     const { data: suppliers } = await db
       .from("suppliers")
@@ -179,7 +235,6 @@ Deno.serve(async (req) => {
     const supplierMap = new Map<string, any>();
     for (const s of suppliers || []) supplierMap.set(s.nif, s);
 
-    // Group invoices by supplier NIF
     const invoicesByNif = new Map<string, typeof invoices>();
     for (const inv of invoices) {
       if (!inv.supplier_nif) continue;
@@ -187,7 +242,6 @@ Deno.serve(async (req) => {
       invoicesByNif.get(inv.supplier_nif)!.push(inv);
     }
 
-    // All invoice numbers for text matching
     const allInvoiceNumbers = invoices.map(i => i.invoice_number).filter(Boolean);
 
     let totalEmailsFound = 0;
@@ -197,11 +251,6 @@ Deno.serve(async (req) => {
     const seenMessageIds = new Set<string>();
     let aiCreditsExhausted = false;
 
-    // ============================================================
-    // MULTI-PASS SEARCH STRATEGY (per-invoice, high recall)
-    // ============================================================
-
-    // Collect all unique messages across passes, deduplicated
     interface CandidateMessage {
       msg: any;
       pass: number;
@@ -215,28 +264,32 @@ Deno.serve(async (req) => {
       candidates.push({ msg, pass, targetNif });
     }
 
-    // --- PASS 1: Search EACH invoice number individually ---
-    // This is the most reliable approach — Gmail handles individual searches best
+    // ============================================================
+    // PASS 1: Search EACH invoice number with MULTIPLE query variations
+    // This is the critical pass — try every possible search string
+    // ============================================================
     for (const inv of invoices) {
       if (!inv.invoice_number || matchedInvoiceIds.has(inv.id)) continue;
-      const terms = extractSearchTerms(inv.invoice_number);
       
-      // Try each search term individually, starting from most specific
-      // Sort by length desc (longer = more specific)
-      const sortedTerms = [...new Set(terms)].sort((a, b) => b.length - a.length);
+      const queries = generateSearchQueries(inv.invoice_number);
+      console.log(`Pass 1 — Invoice "${inv.invoice_number}" → ${queries.length} search variations: ${JSON.stringify(queries)}`);
       
-      for (const term of sortedTerms) {
-        // Skip very short terms (< 4 chars) to avoid noise
-        if (term.length < 4) continue;
+      let foundAny = false;
+      for (const query of queries) {
+        if (query.length < 4) continue;
         
-        const query = `${term}`;
-        console.log(`Pass 1 - Invoice ${inv.invoice_number} → searching: "${term}"`);
         const msgs = await searchNylasMessages(nylasApiKey, grantId, query, 10);
         if (msgs.length > 0) {
-          console.log(`  Found ${msgs.length} emails for term "${term}"`);
+          console.log(`  ✓ Found ${msgs.length} emails for query: "${query}"`);
           for (const msg of msgs) addCandidate(msg, 1, inv.supplier_nif);
-          break; // Found results for this invoice, no need to try other terms
+          foundAny = true;
+          break; // Found results, move to next invoice
+        } else {
+          console.log(`  ✗ No results for: "${query}"`);
         }
+      }
+      if (!foundAny) {
+        console.log(`  ⚠ NO emails found for any of ${queries.length} variations of "${inv.invoice_number}"`);
       }
     }
 
@@ -250,64 +303,58 @@ Deno.serve(async (req) => {
 
       const email = supplier.email;
       const domain = email.includes("@") ? email.split("@").pop() : email.replace(/^@/, "");
-      
       const genericDomains = ["gmail.com", "hotmail.com", "outlook.com", "yahoo.com", "live.com", "sapo.pt", "live.com.pt"];
-      
+
       if (domain && !genericDomains.includes(domain!)) {
         const query = `from:${domain} has:attachment`;
-        console.log(`Pass 2a - Searching by domain for NIF ${nif}: ${query}`);
+        console.log(`Pass 2 - NIF ${nif}: ${query}`);
         const msgs = await searchNylasMessages(nylasApiKey, grantId, query, 10);
         for (const msg of msgs) addCandidate(msg, 2, nif);
       } else if (email.includes("@")) {
         const query = `from:${email} has:attachment`;
-        console.log(`Pass 2b - Searching by email for NIF ${nif}: ${query}`);
+        console.log(`Pass 2 - NIF ${nif}: ${query}`);
         const msgs = await searchNylasMessages(nylasApiKey, grantId, query, 10);
         for (const msg of msgs) addCandidate(msg, 2, nif);
       }
     }
 
-    // --- PASS 3: Search by supplier name + has:attachment ---
+    // --- PASS 3: Search by supplier name ---
     for (const [nif, nifInvoices] of invoicesByNif) {
       const remaining = nifInvoices.filter(i => !matchedInvoiceIds.has(i.id));
       if (remaining.length === 0) continue;
-      
+
       const supplier = supplierMap.get(nif);
       const name = supplier?.name || supplier?.legal_name || nifInvoices[0]?.supplier_name;
       if (!name) continue;
 
       const shortName = name.split(/[,\-]/).map((p: string) => p.trim()).filter(Boolean)[0] || name;
       const query = `${shortName} has:attachment`;
-      console.log(`Pass 3 - Searching by name for NIF ${nif}: ${query.substring(0, 100)}`);
+      console.log(`Pass 3 - NIF ${nif}: ${query}`);
       const msgs = await searchNylasMessages(nylasApiKey, grantId, query, 8);
       for (const msg of msgs) addCandidate(msg, 3, nif);
     }
 
     totalEmailsFound = candidates.length;
-    console.log(`Total candidate emails found across all passes: ${totalEmailsFound}`);
+    console.log(`Total candidate emails: ${totalEmailsFound}`);
 
     // ============================================================
-    // PROCESS CANDIDATES — non-AI matching first, then AI fallback
+    // PROCESS CANDIDATES
     // ============================================================
-
     for (const candidate of candidates) {
       const { msg, pass, targetNif } = candidate;
 
-      // ALWAYS fetch full message to get complete body text (search results have truncated snippets)
       const fullMsg = await getNylasMessage(nylasApiKey, grantId, msg.id) || msg;
 
       const subject = fullMsg.subject || "";
       const snippet = fullMsg.snippet || msg.snippet || "";
-      // Nylas v3: body can be a string (HTML) or object; extract text either way
       const bodyRaw = typeof fullMsg.body === "string" ? fullMsg.body : (fullMsg.body?.text || fullMsg.body?.html || "");
-      // Strip HTML tags for plain text matching
       const bodyText = bodyRaw.replace(/<[^>]+>/g, " ");
       const combinedText = `${subject} ${snippet} ${bodyText}`;
 
-      // --- Step A: Non-AI text matching (fast, free, most common case) ---
+      // --- Non-AI text matching ---
       let matchedInvoice: any = null;
       let confidence = "likely";
 
-      // Check all NIFs' invoices against this email's text
       for (const [nif, nifInvoices] of invoicesByNif) {
         const remaining = nifInvoices.filter(i => !matchedInvoiceIds.has(i.id));
         if (remaining.length === 0) continue;
@@ -320,7 +367,7 @@ Deno.serve(async (req) => {
         }
       }
 
-      // Also check attachment filenames for invoice numbers
+      // Check attachment filenames
       const attachments = (fullMsg.attachments || []).filter((att: any) => {
         const ct = (att.content_type || "").toLowerCase();
         return ct.includes("pdf") || ct.includes("image");
@@ -329,7 +376,7 @@ Deno.serve(async (req) => {
       if (!matchedInvoice) {
         for (const att of attachments) {
           const filename = att.filename || "";
-          for (const [nif, nifInvoices] of invoicesByNif) {
+          for (const [_nif, nifInvoices] of invoicesByNif) {
             const remaining = nifInvoices.filter(i => !matchedInvoiceIds.has(i.id));
             const foundNum = findInvoiceNumberInText(filename, remaining.map(i => i.invoice_number));
             if (foundNum) {
@@ -342,16 +389,12 @@ Deno.serve(async (req) => {
         }
       }
 
-      // If we found a text-based match, upload the first PDF/image attachment and mark as received
+      // Upload attachment and mark as received
       if (matchedInvoice && !matchedInvoiceIds.has(matchedInvoice.id)) {
         let uploadedFilename = "email_match";
 
-        // Always try to download the first PDF/image attachment when we have a text match
         for (const att of attachments) {
-          if (att.size && att.size > MAX_ATTACHMENT_SIZE) {
-            console.log(`Skipping large attachment ${att.filename} (${att.size} bytes)`);
-            continue;
-          }
+          if (att.size && att.size > MAX_ATTACHMENT_SIZE) continue;
           const fileData = await downloadNylasAttachment(nylasApiKey, grantId, att.id, msg.id);
           if (fileData) {
             const fileBuffer = new Uint8Array(fileData);
@@ -370,11 +413,9 @@ Deno.serve(async (req) => {
                 uploaded_by: authUser.id,
               });
               uploadedFilename = att.filename;
-              console.log(`✅ Uploaded attachment "${att.filename}" for invoice ${matchedInvoice.invoice_number}`);
-            } else {
-              console.error(`Upload error for ${att.filename}:`, uploadErr);
+              console.log(`✅ Uploaded "${att.filename}" for ${matchedInvoice.invoice_number}`);
             }
-            break; // Only upload the first successful attachment
+            break;
           }
         }
 
@@ -387,24 +428,18 @@ Deno.serve(async (req) => {
           filename: uploadedFilename,
           confidence,
         });
-        console.log(`✅ Matched invoice ${matchedInvoice.invoice_number} (${confidence}, file: ${uploadedFilename})`);
+        console.log(`✅ Matched ${matchedInvoice.invoice_number} (${confidence})`);
         continue;
       }
 
-      // --- Step B: AI-based parsing (fallback for unmatched emails with attachments) ---
+      // --- AI fallback ---
       if (aiCreditsExhausted || !anthropicApiKey || attachments.length === 0) continue;
-
-      // Only try AI for pass 1 and 2 candidates (higher relevance)
       if (pass === 3) continue;
 
-      // Determine which NIFs to try matching against
       const targetNifs = targetNif ? [targetNif] : [...invoicesByNif.keys()];
 
       for (const att of attachments.slice(0, 2)) {
-        if (att.size && att.size > MAX_ATTACHMENT_SIZE) {
-          console.log(`Skipping large attachment for AI: ${att.filename} (${att.size} bytes)`);
-          continue;
-        }
+        if (att.size && att.size > MAX_ATTACHMENT_SIZE) continue;
 
         const fileData = await downloadNylasAttachment(nylasApiKey, grantId, att.id, msg.id);
         if (!fileData) continue;
@@ -412,15 +447,11 @@ Deno.serve(async (req) => {
         const fileBuffer = new Uint8Array(fileData);
         const b64Data = uint8ToBase64(fileBuffer);
 
-        // Skip unsupported content types for AI
         const ct = (att.content_type || "").toLowerCase();
         const isPdf = ct.includes("pdf");
         const supportedImages = ["image/jpeg", "image/png", "image/gif", "image/webp"];
         const isImage = supportedImages.some(s => ct.includes(s.split("/")[1]));
-        if (!isPdf && !isImage) {
-          console.log(`Skipping unsupported content type for AI: ${att.content_type} (${att.filename})`);
-          continue;
-        }
+        if (!isPdf && !isImage) continue;
 
         try {
           const aiRes = await fetch("https://api.anthropic.com/v1/messages", {
@@ -447,10 +478,9 @@ Deno.serve(async (req) => {
 
           if (!aiRes.ok) {
             const errText = await aiRes.text();
-            console.error("AI parse error:", aiRes.status, errText);
+            console.error("AI error:", aiRes.status, errText);
             if (aiRes.status === 429 || aiRes.status === 402) {
               aiCreditsExhausted = true;
-              console.warn("Anthropic API rate limited or payment issue — switching to non-AI matching only.");
               break;
             }
             continue;
@@ -464,18 +494,15 @@ Deno.serve(async (req) => {
           const parsed = JSON.parse(jsonMatch[0]);
           if (!parsed.is_invoice) continue;
 
-          // Try matching by invoice number first, then amount
           let aiMatchedInvoice: any = null;
           let aiConfidence = "ai_parsed";
 
           for (const nif of targetNifs) {
             const remaining = (invoicesByNif.get(nif) || []).filter(i => !matchedInvoiceIds.has(i.id));
-            // Exact number match
             aiMatchedInvoice = remaining.find(i =>
               parsed.invoice_number && normalizeInvoiceNumber(i.invoice_number) === normalizeInvoiceNumber(parsed.invoice_number)
             );
             if (aiMatchedInvoice) { aiConfidence = "exact_number"; break; }
-            // Amount match
             if (parsed.amount) {
               aiMatchedInvoice = remaining.find(i =>
                 i.amount && Math.abs(Number(i.amount) - parsed.amount) < 0.01
@@ -517,8 +544,8 @@ Deno.serve(async (req) => {
               filename: att.filename,
               confidence: aiConfidence,
             });
-            console.log(`✅ AI matched invoice ${aiMatchedInvoice.invoice_number} (${aiConfidence}, file: ${att.filename})`);
-            break; // Got a match from this message, move to next
+            console.log(`✅ AI matched ${aiMatchedInvoice.invoice_number} (${aiConfidence})`);
+            break;
           }
         } catch (aiErr) {
           console.error("AI parse error:", aiErr);

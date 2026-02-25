@@ -240,7 +240,31 @@ export default function InvoiceContactDialog({ invoice, onClose, onStatusChange 
             <div><span className="text-muted-foreground">Fornecedor:</span> {invoice.supplier_name}</div>
             <div><span className="text-muted-foreground">NIF:</span> {invoice.supplier_nif}</div>
             <div><span className="text-muted-foreground">Valor:</span> {invoice.amount ? `€${Number(invoice.amount).toFixed(2)}` : "—"}</div>
-            <div><span className="text-muted-foreground">Estado:</span> <Badge variant={st.variant} className={st.className}>{st.label}</Badge></div>
+            <div className="flex items-center gap-2">
+              <span className="text-muted-foreground">Estado:</span>
+              <Select
+                value={invoice.status}
+                onValueChange={async (val) => {
+                  const { error } = await supabase.from("invoices").update({ status: val }).eq("id", invoice.id);
+                  if (error) {
+                    toast({ title: "Erro", description: error.message, variant: "destructive" });
+                  } else {
+                    toast({ title: "Estado atualizado" });
+                    onClose();
+                  }
+                }}
+              >
+                <SelectTrigger className="h-7 w-[140px] text-xs">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="missing">Em Falta</SelectItem>
+                  <SelectItem value="contacted">Contactada</SelectItem>
+                  <SelectItem value="received">Recebida</SelectItem>
+                  <SelectItem value="closed">Fechada</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
           </div>
 
           {/* Contact buttons */}
