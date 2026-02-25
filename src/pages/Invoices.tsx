@@ -21,7 +21,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Button } from "@/components/ui/button";
-import { Search, Filter, Eye, Send, UserSearch, Loader2, Mail } from "lucide-react";
+import { Search, Filter, Eye, Send, UserSearch, Loader2, Mail, Share2 } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 import { Progress } from "@/components/ui/progress";
 import { format } from "date-fns";
@@ -30,6 +30,7 @@ import { cn } from "@/lib/utils";
 import InvoiceContactDialog from "@/components/InvoiceContactDialog";
 import BulkEmailDialog from "@/components/BulkEmailDialog";
 import ScanGmailDialog from "@/components/ScanGmailDialog";
+import ShareInvoicesDialog from "@/components/ShareInvoicesDialog";
 
 type Invoice = Tables<"invoices">;
 
@@ -59,6 +60,7 @@ const Invoices = () => {
   const [lookupRunning, setLookupRunning] = useState(false);
   const [lookupProgress, setLookupProgress] = useState({ done: 0, total: 0 });
   const [gmailScanOpen, setGmailScanOpen] = useState(false);
+  const [shareOpen, setShareOpen] = useState(false);
   const [hasEmail, setHasEmail] = useState(false);
   const { toast } = useToast();
 
@@ -192,6 +194,10 @@ const Invoices = () => {
             <Send className="h-4 w-4" />
             Pedir Todas em Falta
           </Button>
+          <Button variant="outline" onClick={() => setShareOpen(true)} className="gap-2">
+            <Share2 className="h-4 w-4" />
+            Partilhar
+          </Button>
         </div>
       </div>
 
@@ -283,6 +289,11 @@ const Invoices = () => {
         onClose={() => setGmailScanOpen(false)}
         companyId={selectedCompany.id}
         onComplete={fetchInvoices}
+      />
+
+      <ShareInvoicesDialog
+        open={shareOpen}
+        onClose={() => setShareOpen(false)}
       />
     </div>
   );

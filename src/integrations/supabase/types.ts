@@ -460,6 +460,50 @@ export type Database = {
         }
         Relationships: []
       }
+      shared_links: {
+        Row: {
+          company_id: string
+          created_at: string
+          created_by: string
+          expires_at: string | null
+          id: string
+          is_active: boolean
+          label: string | null
+          password_hash: string
+          token: string
+        }
+        Insert: {
+          company_id: string
+          created_at?: string
+          created_by: string
+          expires_at?: string | null
+          id?: string
+          is_active?: boolean
+          label?: string | null
+          password_hash: string
+          token?: string
+        }
+        Update: {
+          company_id?: string
+          created_at?: string
+          created_by?: string
+          expires_at?: string | null
+          id?: string
+          is_active?: boolean
+          label?: string | null
+          password_hash?: string
+          token?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "shared_links_company_id_fkey"
+            columns: ["company_id"]
+            isOneToOne: false
+            referencedRelation: "companies"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       suppliers: {
         Row: {
           address: string | null
@@ -521,7 +565,20 @@ export type Database = {
       [_ in never]: never
     }
     Functions: {
+      create_shared_link: {
+        Args: {
+          p_company_id: string
+          p_created_by: string
+          p_label?: string
+          p_password: string
+        }
+        Returns: string
+      }
       is_company_member: { Args: { p_company_id: string }; Returns: boolean }
+      verify_shared_link_password: {
+        Args: { p_link_id: string; p_password: string }
+        Returns: boolean
+      }
     }
     Enums: {
       [_ in never]: never

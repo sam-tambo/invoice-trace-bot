@@ -20,3 +20,6 @@ verify_jwt = false
 
 [functions.nylas-webhook]
 verify_jwt = false
+
+[functions.shared-invoices]
+verify_jwt = false
