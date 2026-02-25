@@ -1,77 +1,68 @@
 
 
-## Problem Analysis
+## Analysis
 
-Two issues to address:
+The app currently has no public-facing landing page -- the Index page is an unused placeholder, and "/" routes directly to the authenticated Dashboard. The user wants a professional, enterprise-grade landing page that:
 
-### Issue 1: Matched invoice has no file attached
-The MEO invoice (FT A/856709073) was found via text matching (Pass 1 — invoice number in email subject/body) and its status was updated to "received", but **no file was uploaded**. Looking at lines 316-363 of the edge function:
-
-- The code finds a text match, then checks for PDF/image attachments on the email
-- If the attachment download succeeds, it uploads to storage and inserts an `attachments` row
-- But if there are no qualifying attachments (e.g. the email only contains the invoice number in text, with no PDF attached), it falls through to the "email_match" path (line 355-363), which marks it "received" with `filename: "email_match"` and **no file upload**
-- Additionally, the storage bucket `invoice-files` is set to `public: false`, but the `getPublicUrl` function in `InvoiceContactDialog` expects public access — so even when files ARE uploaded, the URLs won't work
-
-### Issue 2: AI credits exhausted (Lovable AI)
-The logs show `402 Not enough credits` immediately on the first AI call. The user wants to switch to their own **Anthropic (Claude) API** and **OpenAI API** keys, which are already configured as secrets (`ANTHROPIC_API_KEY`). An `OPENAI_API_KEY` would need to be added if not present.
-
----
+1. Explains InvoiceTrace's purpose (invoice recovery/tracking for Portuguese businesses)
+2. Highlights key features: photo capture of invoices, organization by month/day/provider, Gmail scanning, automated supplier outreach, TOConline sync, accounting sharing portal
+3. No pricing section
+4. Professional, enterprise-quality design
 
 ## Plan
 
-### 1. Fix storage bucket — make it public
-The bucket was created as `public: false` in the initial migration but a later migration tried to set it to `public: true`. The bucket is currently private. Run a migration to update it:
-```sql
-UPDATE storage.buckets SET public = true WHERE id = 'invoice-files';
-```
+### 1. Create a new Landing Page component (`src/pages/Landing.tsx`)
 
-### 2. Fix the "email_match" path — always download the attachment
-When the text match finds the invoice number but the attachment download is skipped or fails, the code still marks it as "received" with no file. Change this logic:
+A full marketing page with the following sections:
 
-- When a text match is found and there are attachments on the email, **always attempt to download and upload the first PDF/image attachment**, even if the invoice number wasn't found in the filename
-- Only fall through to "email_match" (no file) if there are truly **zero** PDF/image attachments on the email
-- After uploading, generate and store the public URL in the `attachments` table (already done via `file_path`)
+**Hero Section**
+- Bold headline: "Nunca mais perca uma fatura" (Never lose an invoice again)
+- Subtitle explaining automatic invoice recovery, organization, and accounting sync
+- Two CTAs: "Começar Agora" (links to /auth) and "Ver Demo"
+- Abstract illustration using Lucide icons arranged in a grid/visual
 
-### 3. Switch AI parsing from Lovable AI to Claude/OpenAI
-Replace the Lovable AI gateway call (lines 388-404) with a direct Anthropic Claude API call using the existing `ANTHROPIC_API_KEY` secret:
+**How It Works (3 steps)**
+- Step 1: Import invoices from e-Fatura or take photos
+- Step 2: Automatic email scanning and supplier outreach
+- Step 3: Organize, share with accounting, sync with TOConline
 
-- Use Claude's vision API (`claude-sonnet-4-20250514`) to parse invoice PDFs/images
-- The API endpoint is `https://api.anthropic.com/v1/messages`
-- Format: send the base64 image as a `image` content block with the same extraction prompt
-- Fall back to OpenAI if Claude fails (would need `OPENAI_API_KEY` secret)
-- Remove the `LOVABLE_API_KEY` dependency for this function entirely
+**Features Grid (6 feature cards)**
+- Camera/Photo Capture: Photograph invoices directly, OCR extraction
+- Smart Organization: Auto-organize by month, day, and provider
+- Gmail Integration: Automatic scanning and matching of invoice emails
+- Automated Outreach: Template-based supplier follow-up emails
+- TOConline Sync: Direct synchronization with TOConline accounting
+- Accounting Portal: Password-protected sharing with external accountants
 
-### 4. Add logging for match results
-Add `console.log` when a match is found, including whether a file was uploaded or not, so debugging is easier.
+**Integration Banner**
+- Visual showing TOConline logo/mention, Gmail, e-Fatura connections
+- "Integra-se com as ferramentas que já usa"
+
+**CTA Section**
+- Final call to action to sign up
+- "Comece a recuperar faturas hoje"
+
+**Footer**
+- Minimal footer with InvoiceTrace branding
+
+### 2. Update Routing (`src/App.tsx`)
+
+- Add a new `/landing` route (public, no auth required) pointing to `Landing`
+- Alternatively, make "/" show Landing for unauthenticated users and Dashboard for authenticated users. Since the current ProtectedRoute already redirects to /auth, I'll create a smarter root route that shows Landing when not logged in and redirects to /dashboard when logged in.
+- Move Dashboard to `/dashboard` route
+- Update sidebar nav to point to `/dashboard` instead of `/`
+
+### 3. Files to modify
+- **Create**: `src/pages/Landing.tsx` -- full landing page
+- **Edit**: `src/App.tsx` -- add Landing route, adjust "/" to show landing for guests / dashboard for auth users
+- **Edit**: `src/components/AppLayout.tsx` -- update nav item for Painel from "/" to "/dashboard"
 
 ### Technical Details
 
-**Claude API call format** (replacing lines 388-404):
-```typescript
-const aiRes = await fetch("https://api.anthropic.com/v1/messages", {
-  method: "POST",
-  headers: {
-    "x-api-key": anthropicApiKey,
-    "anthropic-version": "2023-06-01",
-    "Content-Type": "application/json",
-  },
-  body: JSON.stringify({
-    model: "claude-sonnet-4-20250514",
-    max_tokens: 1024,
-    messages: [{
-      role: "user",
-      content: [
-        { type: "image", source: { type: "base64", media_type: att.content_type, data: b64Data } },
-        { type: "text", text: "..." },
-      ],
-    }],
-  }),
-});
-```
-
-**Storage bucket fix**: Simple SQL migration to flip `public` to `true`.
-
-**Files to modify**:
-- `supabase/functions/scan-gmail-invoices/index.ts` — fix attachment download logic, switch AI to Claude API
-- Database migration — make `invoice-files` bucket public
+- Pure Tailwind CSS, no additional dependencies needed
+- Uses existing Lucide icons (Camera, Search, Mail, Calendar, Building2, Share2, ArrowRight, CheckCircle2, etc.)
+- Responsive design with mobile-first approach
+- Gradient accents using the existing primary blue color scheme
+- Card components from existing UI library for feature cards
+- Inter font already configured
 
