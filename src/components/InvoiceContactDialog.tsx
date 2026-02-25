@@ -250,6 +250,7 @@ export default function InvoiceContactDialog({ invoice, onClose, onStatusChange 
                     toast({ title: "Erro", description: error.message, variant: "destructive" });
                   } else {
                     toast({ title: "Estado atualizado" });
+                    onStatusChange?.();
                     onClose();
                   }
                 }}
