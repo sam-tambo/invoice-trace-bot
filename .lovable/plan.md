@@ -1,48 +1,43 @@
 
 
-## Thorough Diagnosis: Three Critical Bugs Found
+## Plan: Make Email Connection Generic (Support Gmail, Outlook, and Others via Nylas)
 
-### Bug 1: Missing `code_verifier: "nylas"` in token exchange (PRIMARY CAUSE)
+The current implementation is hardcoded to "Gmail" everywhere -- in the UI component name, labels, provider filter queries, and the edge function's `provider` parameter set to `"google"`. Since Nylas supports multiple providers (Google, Microsoft/Outlook, Yahoo, IMAP), this needs to be generalized.
 
-The Nylas documentation for API key authentication **explicitly requires** `"code_verifier": "nylas"` in the POST to `/v3/connect/token`. The current edge function does NOT send this field. From the docs:
+### Changes Required
 
-```text
-POST /v3/connect/token
-{
-  "client_id": "<NYLAS_CLIENT_ID>",
-  "client_secret": "<NYLAS_API_KEY>",
-  "grant_type": "authorization_code",
-  "code": "<CODE>",
-  "redirect_uri": "<CALLBACK_URI>",
-  "code_verifier": "nylas"        <-- MISSING from our code
-}
-```
+**1. Rename and update `GmailConnectionCard.tsx` → `EmailConnectionCard.tsx`**
+- Rename component from `GmailConnectionCard` to `EmailConnectionCard`
+- Change title from "Gmail" to "Caixa de Correio" (Mailbox)
+- Change description to mention Gmail, Outlook, and other providers
+- Change button text from "Ligar Gmail" to "Ligar Email"
+- Update toast messages to be generic ("Email ligado" instead of "Gmail ligado")
+- Remove the `.eq("provider", "gmail")` filter -- query any email connection for the company
+- Show the provider name dynamically based on what's stored (e.g., "Gmail", "Outlook")
+- Update the disconnect button label accordingly
 
-Without this, Nylas rejects the code exchange, returning "Given 'code' not valid or expired". The code IS reaching the function (confirmed via curl), but the Nylas API rejects it.
+**2. Update `supabase/functions/gmail-auth-callback/index.ts`**
+- Remove the hardcoded `authUrl.searchParams.set("provider", "google")` on line 64 -- this forces the Google provider. Without it, Nylas shows its own provider picker UI where users can choose Gmail, Outlook, Yahoo, etc.
+- When saving to DB, store the actual provider from `tokenData.provider` instead of hardcoding `"gmail"`
 
-**File:** `supabase/functions/gmail-auth-callback/index.ts` line 64-70 -- add `code_verifier: "nylas"` to the body.
+**3. Update `supabase/functions/scan-gmail-invoices/index.ts`**
+- Remove the `.eq("provider", "gmail")` filter on line 93 -- scan whichever email provider is connected
 
-### Bug 2: `scan-gmail-invoices` uses non-existent `getClaims()` method
+**4. Update `src/pages/Invoices.tsx`**
+- Change the `checkGmailConnection` function to not filter by `provider: "gmail"` -- check for any active email connection
+- Rename `hasGmail` state to `hasEmail` and update references
+- Update button labels from "Procurar no Gmail" to "Procurar no Email"
 
-Line 70 of `scan-gmail-invoices/index.ts` calls `supabase.auth.getClaims(token)` which does not exist in this environment. This means even if Gmail connects, scanning will immediately fail with an auth error. Must be replaced with `supabase.auth.getUser()`.
+**5. Update `src/pages/Settings.tsx`**
+- Update the import from `GmailConnectionCard` to `EmailConnectionCard`
 
-### Bug 3: `scan-gmail-invoices` has incomplete CORS headers
-
-Line 7 of `scan-gmail-invoices/index.ts` only allows `authorization, x-client-info, apikey, content-type` -- missing the `x-supabase-client-platform*` headers. Same CORS bug that was already fixed in `gmail-auth-callback`.
-
-### Implementation Steps
-
-1. **`supabase/functions/gmail-auth-callback/index.ts`**: Add `code_verifier: "nylas"` to the token exchange body (1 line change)
-
-2. **`supabase/functions/scan-gmail-invoices/index.ts`**: 
-   - Fix CORS headers to include all supabase client headers
-   - Replace `getClaims(token)` with `getUser()` and adjust the user ID extraction
-
-3. **Deploy both functions** and test the POST exchange with curl to verify it works
-
-4. **Test end-to-end** on the published app
+**6. Update `src/components/ScanGmailDialog.tsx`**
+- Update dialog title/labels from Gmail-specific to generic email terminology
 
 ### Technical Details
 
-The `code_verifier` field is part of PKCE (Proof Key for Code Exchange). Nylas uses a static value `"nylas"` as the verifier for their hosted OAuth flow with API key authentication. Without it, Nylas cannot verify the code exchange request is legitimate and rejects it outright. This single missing field is why every connection attempt has failed silently -- the code reaches the function, Nylas rejects the exchange, the error is returned but potentially swallowed by the frontend error handling.
+- The key Nylas change is removing `provider: "google"` from the auth URL. Per Nylas docs, omitting the `provider` parameter shows the Nylas hosted provider picker, letting users choose their email provider.
+- The `provider` value returned by Nylas in the token exchange (`tokenData.provider`) will be stored in the DB, enabling the UI to show which provider is connected (e.g., "Google", "Microsoft", "Yahoo").
+- The Nylas message search API (`search_query_native`) works across all providers, so `scan-gmail-invoices` needs no API-level changes beyond removing the provider filter.
+- A provider label map will be added to the UI: `{ google: "Gmail", microsoft: "Outlook", yahoo: "Yahoo Mail", imap: "Email" }`.
 
