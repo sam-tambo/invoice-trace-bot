@@ -337,7 +337,7 @@ Deno.serve(async (req) => {
                 file_path: filePath,
                 file_type: att.content_type,
                 file_size: att.size || fileBuffer.length,
-                uploaded_by: "00000000-0000-0000-0000-000000000000",
+                uploaded_by: authUser.id,
               });
               uploadedFilename = att.filename;
               console.log(`✅ Uploaded attachment "${att.filename}" for invoice ${matchedInvoice.invoice_number}`);
@@ -467,7 +467,7 @@ Deno.serve(async (req) => {
               file_path: filePath,
               file_type: att.content_type,
               file_size: att.size || fileBuffer.length,
-              uploaded_by: "00000000-0000-0000-0000-000000000000",
+              uploaded_by: authUser.id,
             });
 
             matchedInvoiceIds.add(aiMatchedInvoice.id);
