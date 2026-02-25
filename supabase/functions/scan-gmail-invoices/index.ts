@@ -86,7 +86,7 @@ Deno.serve(async (req) => {
     const supabaseAnonKey = Deno.env.get("SUPABASE_ANON_KEY")!;
     const serviceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
     const nylasApiKey = Deno.env.get("NYLAS_API_KEY")!;
-    const lovableApiKey = Deno.env.get("LOVABLE_API_KEY");
+    const anthropicApiKey = Deno.env.get("ANTHROPIC_API_KEY");
 
     // Auth
     const authHeader = req.headers.get("Authorization");
@@ -314,21 +314,22 @@ Deno.serve(async (req) => {
 
       // If we found a text-based match, upload the first PDF/image attachment and mark as received
       if (matchedInvoice && !matchedInvoiceIds.has(matchedInvoice.id)) {
-        const att = attachments[0];
-        if (att) {
-          // Skip oversized attachments
+        let uploadedFilename = "email_match";
+
+        // Always try to download the first PDF/image attachment when we have a text match
+        for (const att of attachments) {
           if (att.size && att.size > MAX_ATTACHMENT_SIZE) {
             console.log(`Skipping large attachment ${att.filename} (${att.size} bytes)`);
-          } else {
-            const fileData = await downloadNylasAttachment(nylasApiKey, grantId, att.id, msg.id);
-            if (fileData) {
-              const fileBuffer = new Uint8Array(fileData);
-              const filePath = `${company_id}/${matchedInvoice.supplier_nif}/${Date.now()}_${att.filename}`;
-              await db.storage.from("invoice-files").upload(filePath, fileBuffer, {
-                contentType: att.content_type, upsert: false,
-              });
-
-              await db.from("invoices").update({ status: "received" }).eq("id", matchedInvoice.id);
+            continue;
+          }
+          const fileData = await downloadNylasAttachment(nylasApiKey, grantId, att.id, msg.id);
+          if (fileData) {
+            const fileBuffer = new Uint8Array(fileData);
+            const filePath = `${company_id}/${matchedInvoice.supplier_nif}/${Date.now()}_${att.filename}`;
+            const { error: uploadErr } = await db.storage.from("invoice-files").upload(filePath, fileBuffer, {
+              contentType: att.content_type, upsert: false,
+            });
+            if (!uploadErr) {
               await db.from("attachments").insert({
                 company_id,
                 invoice_id: matchedInvoice.id,
@@ -338,33 +339,30 @@ Deno.serve(async (req) => {
                 file_size: att.size || fileBuffer.length,
                 uploaded_by: "00000000-0000-0000-0000-000000000000",
               });
-
-              matchedInvoiceIds.add(matchedInvoice.id);
-              totalMatched++;
-              results.push({
-                invoice_number: matchedInvoice.invoice_number,
-                supplier_nif: matchedInvoice.supplier_nif,
-                filename: att.filename,
-                confidence,
-              });
-              continue; // Move to next candidate
+              uploadedFilename = att.filename;
+              console.log(`✅ Uploaded attachment "${att.filename}" for invoice ${matchedInvoice.invoice_number}`);
+            } else {
+              console.error(`Upload error for ${att.filename}:`, uploadErr);
             }
+            break; // Only upload the first successful attachment
           }
         }
-        // Even without attachment download, mark the text match
+
+        await db.from("invoices").update({ status: "received" }).eq("id", matchedInvoice.id);
         matchedInvoiceIds.add(matchedInvoice.id);
         totalMatched++;
         results.push({
           invoice_number: matchedInvoice.invoice_number,
           supplier_nif: matchedInvoice.supplier_nif,
-          filename: "email_match",
+          filename: uploadedFilename,
           confidence,
         });
+        console.log(`✅ Matched invoice ${matchedInvoice.invoice_number} (${confidence}, file: ${uploadedFilename})`);
         continue;
       }
 
       // --- Step B: AI-based parsing (fallback for unmatched emails with attachments) ---
-      if (aiCreditsExhausted || !lovableApiKey || attachments.length === 0) continue;
+      if (aiCreditsExhausted || !anthropicApiKey || attachments.length === 0) continue;
 
       // Only try AI for pass 1 and 2 candidates (higher relevance)
       if (pass === 3) continue;
@@ -385,18 +383,20 @@ Deno.serve(async (req) => {
         const b64Data = uint8ToBase64(fileBuffer);
 
         try {
-          const aiRes = await fetch("https://ai.gateway.lovable.dev/v1/chat/completions", {
+          const aiRes = await fetch("https://api.anthropic.com/v1/messages", {
             method: "POST",
             headers: {
-              Authorization: `Bearer ${lovableApiKey}`,
+              "x-api-key": anthropicApiKey,
+              "anthropic-version": "2023-06-01",
               "Content-Type": "application/json",
             },
             body: JSON.stringify({
-              model: "google/gemini-2.5-flash",
+              model: "claude-sonnet-4-20250514",
+              max_tokens: 1024,
               messages: [{
                 role: "user",
                 content: [
-                  { type: "image_url", image_url: { url: `data:${att.content_type};base64,${b64Data}` } },
+                  { type: "image", source: { type: "base64", media_type: att.content_type, data: b64Data } },
                   { type: "text", text: `Analisa este documento e diz-me se é uma fatura. Se sim, extrai: invoice_number, amount (total com IVA), net_amount, vat_amount, issue_date (YYYY-MM-DD), due_date (YYYY-MM-DD), supplier_nif. Responde APENAS em JSON: {"is_invoice": true/false, "invoice_number": "...", "amount": 0, "net_amount": 0, "vat_amount": 0, "issue_date": "...", "due_date": "...", "supplier_nif": "..."}` },
                 ],
               }],
@@ -406,16 +406,16 @@ Deno.serve(async (req) => {
           if (!aiRes.ok) {
             const errText = await aiRes.text();
             console.error("AI parse error:", aiRes.status, errText);
-            if (aiRes.status === 402) {
+            if (aiRes.status === 429 || aiRes.status === 402) {
               aiCreditsExhausted = true;
-              console.warn("AI credits exhausted — switching to non-AI matching only for remaining emails.");
+              console.warn("Anthropic API rate limited or payment issue — switching to non-AI matching only.");
               break;
             }
             continue;
           }
 
           const aiData = await aiRes.json();
-          const textContent = aiData.choices?.[0]?.message?.content || "";
+          const textContent = aiData.content?.[0]?.text || "";
           const jsonMatch = textContent.match(/\{[\s\S]*\}/);
           if (!jsonMatch) continue;
 
@@ -475,6 +475,7 @@ Deno.serve(async (req) => {
               filename: att.filename,
               confidence: aiConfidence,
             });
+            console.log(`✅ AI matched invoice ${aiMatchedInvoice.invoice_number} (${aiConfidence}, file: ${att.filename})`);
             break; // Got a match from this message, move to next
           }
         } catch (aiErr) {
@@ -490,7 +491,7 @@ Deno.serve(async (req) => {
       details: results,
     };
     if (aiCreditsExhausted) {
-      response.warning = "Créditos de IA esgotados. Algumas faturas foram correspondidas apenas por número no texto do email.";
+      response.warning = "API de IA indisponível temporariamente. Algumas faturas foram correspondidas apenas por número no texto do email.";
     }
 
     return new Response(JSON.stringify(response), {
