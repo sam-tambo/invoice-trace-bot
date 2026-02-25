@@ -24,6 +24,29 @@ function normalizeInvoiceNumber(num: string): string {
   return num.replace(/[\s\-\/\.]/g, "").toUpperCase();
 }
 
+/** Extract the "core" part of an invoice number: strip the doc-type prefix (FT, FS, FR, NC, ND, etc.)
+ *  and any leading series code, returning the most distinctive numeric/alphanumeric identifier.
+ *  E.g. "FT PT2025/870578" -> ["PT2025/870578", "870578"]
+ *       "FS 1A2501/10396"  -> ["1A2501/10396", "10396"]
+ *       "FR IDSM125/20577986" -> ["IDSM125/20577986", "20577986"]
+ */
+function extractSearchTerms(invoiceNumber: string): string[] {
+  const terms: string[] = [invoiceNumber]; // always include full number
+  // Strip document type prefix (FT, FS, FR, NC, ND, FP, VD, etc.) + optional space
+  const withoutPrefix = invoiceNumber.replace(/^(FT|FS|FR|NC|ND|FP|VD|RC|GR|GT|GA|GC|GD)\s+/i, "");
+  if (withoutPrefix !== invoiceNumber) terms.push(withoutPrefix);
+  // Extract just the number after the last "/"
+  const lastSlash = invoiceNumber.lastIndexOf("/");
+  if (lastSlash !== -1) {
+    const suffix = invoiceNumber.substring(lastSlash + 1);
+    if (suffix.length >= 4) terms.push(suffix); // only if meaningful (4+ chars)
+  }
+  // Also try the series/number part (e.g. "A/856709073" from "FT A/856709073")
+  const seriesMatch = invoiceNumber.match(/([A-Z0-9]+\/\d{4,})/i);
+  if (seriesMatch && !terms.includes(seriesMatch[1])) terms.push(seriesMatch[1]);
+  return [...new Set(terms)];
+}
+
 function findInvoiceNumberInText(text: string, invoiceNumbers: string[]): string | null {
   if (!text) return null;
   const upperText = text.toUpperCase();
@@ -175,83 +198,119 @@ Deno.serve(async (req) => {
     let aiCreditsExhausted = false;
 
     // ============================================================
-    // MULTI-PASS SEARCH STRATEGY
+    // MULTI-PASS SEARCH STRATEGY (aggressive, high recall)
     // ============================================================
 
     // Collect all unique messages across passes, deduplicated
     interface CandidateMessage {
       msg: any;
-      pass: number; // 1 = exact number, 2 = supplier email, 3 = supplier name
+      pass: number; // 1 = invoice number, 2 = supplier email, 3 = supplier name
       targetNif: string;
     }
     const candidates: CandidateMessage[] = [];
 
-    // --- PASS 1: Search by exact invoice number (highest confidence) ---
-    // Search each invoice number directly — most precise
-    const uniqueNumbers = [...new Set(allInvoiceNumbers)];
-    // Batch invoice numbers in groups to avoid too many API calls
-    const numberBatches: string[][] = [];
-    for (let i = 0; i < uniqueNumbers.length; i += 5) {
-      numberBatches.push(uniqueNumbers.slice(i, i + 5));
+    function addCandidate(msg: any, pass: number, targetNif: string) {
+      if (seenMessageIds.has(msg.id)) return;
+      seenMessageIds.add(msg.id);
+      candidates.push({ msg, pass, targetNif });
     }
 
-    for (const batch of numberBatches) {
-      // Use OR to search for any of the invoice numbers
-      const query = batch.map(n => `"${n}"`).join(" OR ");
-      console.log(`Pass 1 - Searching by invoice numbers: ${query.substring(0, 120)}...`);
-      const msgs = await searchNylasMessages(nylasApiKey, grantId, query, 10);
+    // --- PASS 1: Search by invoice number terms (multiple strategies) ---
+    // For each invoice, generate multiple search terms and try them
+    const searchTermsMap = new Map<string, { terms: string[], nif: string, invoiceId: string }>();
+    for (const inv of invoices) {
+      if (!inv.invoice_number) continue;
+      searchTermsMap.set(inv.id, {
+        terms: extractSearchTerms(inv.invoice_number),
+        nif: inv.supplier_nif,
+        invoiceId: inv.id,
+      });
+    }
+
+    // Strategy 1a: Search without quotes (Gmail handles this better with special chars)
+    const allSearchTerms: { term: string, nif: string }[] = [];
+    for (const [, info] of searchTermsMap) {
+      // Use the most distinctive term (usually the number after /)
+      for (const term of info.terms) {
+        allSearchTerms.push({ term, nif: info.nif });
+      }
+    }
+
+    // Deduplicate and batch search terms — use 3 per query for better results
+    const uniqueTerms = [...new Map(allSearchTerms.map(t => [t.term, t])).values()];
+    // Sort by length descending — longer terms are more specific, search them first
+    uniqueTerms.sort((a, b) => b.term.length - a.term.length);
+
+    const termBatches: typeof uniqueTerms[] = [];
+    for (let i = 0; i < uniqueTerms.length; i += 3) {
+      termBatches.push(uniqueTerms.slice(i, i + 3));
+    }
+
+    for (const batch of termBatches) {
+      // Search WITHOUT quotes for better Gmail compatibility with / and special chars
+      const query = batch.map(t => t.term).join(" OR ");
+      console.log(`Pass 1 - Searching: ${query.substring(0, 140)}`);
+      const msgs = await searchNylasMessages(nylasApiKey, grantId, query, 15);
       for (const msg of msgs) {
-        if (!seenMessageIds.has(msg.id)) {
-          seenMessageIds.add(msg.id);
-          // Determine which NIF this might belong to by checking content
-          const text = `${msg.subject || ""} ${msg.snippet || ""}`;
-          for (const [nif, nifInvoices] of invoicesByNif) {
-            const nums = nifInvoices.map(i => i.invoice_number);
-            if (findInvoiceNumberInText(text, nums)) {
-              candidates.push({ msg, pass: 1, targetNif: nif });
-              break;
-            }
-          }
-          // If no NIF match from text, still add as generic candidate
-          if (!candidates.find(c => c.msg.id === msg.id)) {
-            candidates.push({ msg, pass: 1, targetNif: "" });
+        // Try to associate with a NIF
+        const text = `${msg.subject || ""} ${msg.snippet || ""}`;
+        let matched = false;
+        for (const [nif, nifInvoices] of invoicesByNif) {
+          const nums = nifInvoices.map(i => i.invoice_number);
+          if (findInvoiceNumberInText(text, nums)) {
+            addCandidate(msg, 1, nif);
+            matched = true;
+            break;
           }
         }
+        if (!matched) addCandidate(msg, 1, "");
       }
     }
 
     // --- PASS 2: Search by supplier email + has:attachment ---
+    // Also search by supplier domain (not just from:full-email)
     for (const [nif, nifInvoices] of invoicesByNif) {
       const supplier = supplierMap.get(nif);
       if (!supplier?.email) continue;
 
-      const query = `from:${supplier.email} has:attachment`;
-      console.log(`Pass 2 - Searching by supplier email for NIF ${nif}: ${query}`);
-      const msgs = await searchNylasMessages(nylasApiKey, grantId, query, 10);
-      for (const msg of msgs) {
-        if (!seenMessageIds.has(msg.id)) {
-          seenMessageIds.add(msg.id);
-          candidates.push({ msg, pass: 2, targetNif: nif });
-        }
+      // Extract domain from email for broader matching
+      const email = supplier.email;
+      const domain = email.includes("@") ? email.split("@").pop() : email.replace(/^@/, "");
+      
+      // Skip generic email domains
+      const genericDomains = ["gmail.com", "hotmail.com", "outlook.com", "yahoo.com", "live.com", "sapo.pt", "live.com.pt"];
+      
+      if (domain && !genericDomains.includes(domain!)) {
+        // Search by domain — catches all emails from that company
+        const query = `from:${domain} has:attachment`;
+        console.log(`Pass 2a - Searching by domain for NIF ${nif}: ${query}`);
+        const msgs = await searchNylasMessages(nylasApiKey, grantId, query, 10);
+        for (const msg of msgs) addCandidate(msg, 2, nif);
+      } else if (email.includes("@")) {
+        // For generic domains, use full email address
+        const query = `from:${email} has:attachment`;
+        console.log(`Pass 2b - Searching by email for NIF ${nif}: ${query}`);
+        const msgs = await searchNylasMessages(nylasApiKey, grantId, query, 10);
+        for (const msg of msgs) addCandidate(msg, 2, nif);
       }
     }
 
-    // --- PASS 3: Search by supplier name + invoice keywords ---
+    // --- PASS 3: Search by supplier name (for ALL suppliers, not just those without email) ---
     for (const [nif, nifInvoices] of invoicesByNif) {
+      // Skip if we already have candidates for all invoices of this NIF
+      const remaining = nifInvoices.filter(i => !matchedInvoiceIds.has(i.id));
+      if (remaining.length === 0) continue;
+      
       const supplier = supplierMap.get(nif);
-      if (supplier?.email) continue; // Already searched in pass 2
       const name = supplier?.name || supplier?.legal_name || nifInvoices[0]?.supplier_name;
       if (!name) continue;
 
-      const query = `${name} fatura OR invoice OR recibo has:attachment`;
-      console.log(`Pass 3 - Searching by supplier name for NIF ${nif}: ${query.substring(0, 100)}`);
-      const msgs = await searchNylasMessages(nylasApiKey, grantId, query, 5);
-      for (const msg of msgs) {
-        if (!seenMessageIds.has(msg.id)) {
-          seenMessageIds.add(msg.id);
-          candidates.push({ msg, pass: 3, targetNif: nif });
-        }
-      }
+      // Use a shorter, more searchable version of the name
+      const shortName = name.split(/[,\-]/).map(p => p.trim()).filter(Boolean)[0] || name;
+      const query = `${shortName} has:attachment`;
+      console.log(`Pass 3 - Searching by name for NIF ${nif}: ${query.substring(0, 100)}`);
+      const msgs = await searchNylasMessages(nylasApiKey, grantId, query, 8);
+      for (const msg of msgs) addCandidate(msg, 3, nif);
     }
 
     totalEmailsFound = candidates.length;
