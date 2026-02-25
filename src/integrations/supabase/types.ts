@@ -257,11 +257,15 @@ export type Database = {
           created_at: string
           created_by: string
           due_date: string | null
+          extraction_confidence: string | null
+          extraction_notes: string | null
           id: string
           invoice_number: string
           issue_date: string | null
           last_contact_at: string | null
           net_amount: number | null
+          raw_image_url: string | null
+          source: string | null
           status: string
           supplier_id: string | null
           supplier_name: string
@@ -275,11 +279,15 @@ export type Database = {
           created_at?: string
           created_by: string
           due_date?: string | null
+          extraction_confidence?: string | null
+          extraction_notes?: string | null
           id?: string
           invoice_number: string
           issue_date?: string | null
           last_contact_at?: string | null
           net_amount?: number | null
+          raw_image_url?: string | null
+          source?: string | null
           status?: string
           supplier_id?: string | null
           supplier_name?: string
@@ -293,11 +301,15 @@ export type Database = {
           created_at?: string
           created_by?: string
           due_date?: string | null
+          extraction_confidence?: string | null
+          extraction_notes?: string | null
           id?: string
           invoice_number?: string
           issue_date?: string | null
           last_contact_at?: string | null
           net_amount?: number | null
+          raw_image_url?: string | null
+          source?: string | null
           status?: string
           supplier_id?: string | null
           supplier_name?: string
