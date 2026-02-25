@@ -1,61 +1,77 @@
 
 
-## Diagnosis: Two Critical Bugs + Search Strategy Issues
+## Problem Analysis
 
-### Bug 1: `Maximum call stack size exceeded` (THE CRASH)
+Two issues to address:
 
-**Line 191**: `btoa(String.fromCharCode(...fileBuffer))` — the spread operator `...fileBuffer` passes every byte as a separate argument to `String.fromCharCode`. For a 1MB PDF, that's ~1,000,000 arguments on the call stack. JavaScript's call stack limit is typically ~10,000-30,000. This crashes the function every time it tries to process an attachment.
+### Issue 1: Matched invoice has no file attached
+The MEO invoice (FT A/856709073) was found via text matching (Pass 1 — invoice number in email subject/body) and its status was updated to "received", but **no file was uploaded**. Looking at lines 316-363 of the edge function:
 
-**Fix**: Use a chunked base64 encoding approach that processes bytes in batches of 8192.
+- The code finds a text match, then checks for PDF/image attachments on the email
+- If the attachment download succeeds, it uploads to storage and inserts an `attachments` row
+- But if there are no qualifying attachments (e.g. the email only contains the invoice number in text, with no PDF attached), it falls through to the "email_match" path (line 355-363), which marks it "received" with `filename: "email_match"` and **no file upload**
+- Additionally, the storage bucket `invoice-files` is set to `public: false`, but the `getPublicUrl` function in `InvoiceContactDialog` expects public access — so even when files ARE uploaded, the URLs won't work
 
-### Bug 2: `402 Not enough credits` for AI parsing
+### Issue 2: AI credits exhausted (Lovable AI)
+The logs show `402 Not enough credits` immediately on the first AI call. The user wants to switch to their own **Anthropic (Claude) API** and **OpenAI API** keys, which are already configured as secrets (`ANTHROPIC_API_KEY`). An `OPENAI_API_KEY` would need to be added if not present.
 
-The Lovable AI gateway returns 402 when credits are exhausted. The function logs this but keeps trying subsequent attachments, wasting time. More importantly, the function should have a **fallback matching strategy** that doesn't require AI at all — matching by invoice number in the email subject/body or filename.
+---
 
-### Bug 3: Search queries are too restrictive
+## Plan
 
-Current queries combine `from:email` + `{invoice_numbers}` + `fatura OR invoice...` into one query. This means ALL conditions must match. If the supplier sends from a different email address, or uses different terminology, nothing is found.
-
-**Better strategy**: Run multiple search passes with decreasing specificity:
-1. **Pass 1**: Search by exact invoice number (highest confidence)
-2. **Pass 2**: Search by supplier email + broad invoice terms (medium confidence)
-3. **Pass 3**: Search by supplier name + invoice terms (lower confidence)
-
-### Implementation Plan
-
-**File: `supabase/functions/scan-gmail-invoices/index.ts`**
-
-1. **Fix base64 encoding** — Replace the spread-based `btoa` with a chunked approach:
-```text
-function uint8ToBase64(bytes: Uint8Array): string {
-  let binary = "";
-  for (let i = 0; i < bytes.length; i += 8192) {
-    const chunk = bytes.subarray(i, i + 8192);
-    binary += String.fromCharCode(...chunk);
-  }
-  return btoa(binary);
-}
+### 1. Fix storage bucket — make it public
+The bucket was created as `public: false` in the initial migration but a later migration tried to set it to `public: true`. The bucket is currently private. Run a migration to update it:
+```sql
+UPDATE storage.buckets SET public = true WHERE id = 'invoice-files';
 ```
 
-2. **Add non-AI matching as primary strategy** — Before downloading/parsing attachments with AI, check if the email subject, body snippet, or attachment filename contains an invoice number. This is fast, free, and catches most cases.
+### 2. Fix the "email_match" path — always download the attachment
+When the text match finds the invoice number but the attachment download is skipped or fails, the code still marks it as "received" with no file. Change this logic:
 
-3. **Restructure search into multiple passes**:
-   - Pass 1: For each invoice number, search `"invoice_number"` directly (exact match, highest confidence)
-   - Pass 2: For each supplier with email, search `from:supplier@email.com has:attachment` (medium confidence)
-   - Pass 3: For suppliers without email, search by supplier name + `fatura` (lower confidence)
-   - Deduplicate results across passes
+- When a text match is found and there are attachments on the email, **always attempt to download and upload the first PDF/image attachment**, even if the invoice number wasn't found in the filename
+- Only fall through to "email_match" (no file) if there are truly **zero** PDF/image attachments on the email
+- After uploading, generate and store the public URL in the `attachments` table (already done via `file_path`)
 
-4. **Add confidence field to results** — Each match gets a confidence level: `exact_number`, `ai_parsed`, `amount_match`, `likely` so the user knows which matches to review.
+### 3. Switch AI parsing from Lovable AI to Claude/OpenAI
+Replace the Lovable AI gateway call (lines 388-404) with a direct Anthropic Claude API call using the existing `ANTHROPIC_API_KEY` secret:
 
-5. **Gracefully handle AI credit exhaustion** — When a 402 is received, stop calling AI for the rest of the run and rely on non-AI matching only. Log a warning that gets surfaced to the user.
+- Use Claude's vision API (`claude-sonnet-4-20250514`) to parse invoice PDFs/images
+- The API endpoint is `https://api.anthropic.com/v1/messages`
+- Format: send the base64 image as a `image` content block with the same extraction prompt
+- Fall back to OpenAI if Claude fails (would need `OPENAI_API_KEY` secret)
+- Remove the `LOVABLE_API_KEY` dependency for this function entirely
 
-6. **Cap attachment size** — Skip attachments larger than 5MB to avoid memory issues and slow processing.
+### 4. Add logging for match results
+Add `console.log` when a match is found, including whether a file was uploaded or not, so debugging is easier.
 
 ### Technical Details
 
-The `String.fromCharCode(...array)` pattern is a well-known JavaScript pitfall. The spread operator converts the array into individual function arguments, each consuming a stack frame. The fix chunks the array into groups of 8192 bytes (safely under any stack limit) and concatenates the results.
+**Claude API call format** (replacing lines 388-404):
+```typescript
+const aiRes = await fetch("https://api.anthropic.com/v1/messages", {
+  method: "POST",
+  headers: {
+    "x-api-key": anthropicApiKey,
+    "anthropic-version": "2023-06-01",
+    "Content-Type": "application/json",
+  },
+  body: JSON.stringify({
+    model: "claude-sonnet-4-20250514",
+    max_tokens: 1024,
+    messages: [{
+      role: "user",
+      content: [
+        { type: "image", source: { type: "base64", media_type: att.content_type, data: b64Data } },
+        { type: "text", text: "..." },
+      ],
+    }],
+  }),
+});
+```
 
-The multi-pass search strategy follows how a human would search: first look for the exact invoice number, then broaden to the supplier, then broaden further. This dramatically improves recall while maintaining precision through confidence scoring.
+**Storage bucket fix**: Simple SQL migration to flip `public` to `true`.
 
-The non-AI matching layer (checking subject/body/filename for invoice numbers) will catch the majority of cases where suppliers email invoices with the invoice number visible in the email, avoiding both the AI cost and the credit exhaustion issue entirely.
+**Files to modify**:
+- `supabase/functions/scan-gmail-invoices/index.ts` — fix attachment download logic, switch AI to Claude API
+- Database migration — make `invoice-files` bucket public
 
