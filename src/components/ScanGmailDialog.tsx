@@ -53,10 +53,10 @@ const ScanGmailDialog = ({ open, onClose, companyId, onComplete }: Props) => {
       <DialogContent className="sm:max-w-md">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
-            <Mail className="h-5 w-5" /> Procurar no Gmail
+            <Mail className="h-5 w-5" /> Procurar no Email
           </DialogTitle>
           <DialogDescription>
-            Procura emails de fornecedores com faturas em anexo e faz correspondência automática.
+            Procura emails de fornecedores com faturas em anexo e faz correspondência automática. Funciona com Gmail, Outlook e outros.
           </DialogDescription>
         </DialogHeader>
 

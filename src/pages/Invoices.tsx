@@ -59,7 +59,7 @@ const Invoices = () => {
   const [lookupRunning, setLookupRunning] = useState(false);
   const [lookupProgress, setLookupProgress] = useState({ done: 0, total: 0 });
   const [gmailScanOpen, setGmailScanOpen] = useState(false);
-  const [hasGmail, setHasGmail] = useState(false);
+  const [hasEmail, setHasEmail] = useState(false);
   const { toast } = useToast();
 
   const fetchInvoices = async () => {
@@ -131,21 +131,20 @@ const Invoices = () => {
     fetchInvoices();
   };
 
-  const checkGmailConnection = async () => {
+  const checkEmailConnection = async () => {
     if (!selectedCompany) return;
     const { data } = await supabase
       .from("email_connections")
       .select("id")
       .eq("company_id", selectedCompany.id)
-      .eq("provider", "gmail")
       .maybeSingle();
-    setHasGmail(!!data);
+    setHasEmail(!!data);
   };
 
   useEffect(() => {
     fetchInvoices();
     fetchSuppliersWithEmail();
-    checkGmailConnection();
+    checkEmailConnection();
   }, [selectedCompany]);
 
   const filtered = invoices.filter((inv) => {
@@ -183,10 +182,10 @@ const Invoices = () => {
             {lookupRunning ? <Loader2 className="h-4 w-4 animate-spin" /> : <UserSearch className="h-4 w-4" />}
             {lookupRunning ? `A procurar (${lookupProgress.done}/${lookupProgress.total})` : "Procurar Fornecedores"}
           </Button>
-          {hasGmail && (
+          {hasEmail && (
             <Button variant="outline" onClick={() => setGmailScanOpen(true)} className="gap-2">
               <Mail className="h-4 w-4" />
-              Procurar no Gmail
+              Procurar no Email
             </Button>
           )}
           <Button onClick={() => setBulkOpen(true)} className="gap-2">

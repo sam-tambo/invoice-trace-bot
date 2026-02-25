@@ -15,7 +15,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import GmailConnectionCard from "@/components/GmailConnectionCard";
+import EmailConnectionCard from "@/components/EmailConnectionCard";
 
 const SettingsPage = () => {
   const { user } = useAuth();
@@ -92,7 +92,7 @@ const SettingsPage = () => {
         </CardContent>
       </Card>
 
-      <GmailConnectionCard />
+      <EmailConnectionCard />
 
       <Dialog open={newCompanyOpen} onOpenChange={setNewCompanyOpen}>
         <DialogContent>

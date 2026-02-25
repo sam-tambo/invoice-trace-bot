@@ -61,7 +61,7 @@ Deno.serve(async (req) => {
       authUrl.searchParams.set("response_type", "code");
       authUrl.searchParams.set("state", state);
       authUrl.searchParams.set("access_type", "offline");
-      authUrl.searchParams.set("provider", "google");
+      // No provider set — Nylas shows its provider picker (Gmail, Outlook, Yahoo, etc.)
 
       console.log("Generated Nylas auth URL with redirect_uri:", NYLAS_CALLBACK_URI);
 
@@ -135,15 +135,17 @@ Deno.serve(async (req) => {
         Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!
       );
 
+      const provider = tokenData.provider || "unknown";
+
       const { data: existing } = await serviceDb
         .from("email_connections")
         .select("id")
         .eq("company_id", company_id)
-        .eq("provider", "gmail")
         .maybeSingle();
 
       const connectionData = {
         user_id,
+        provider,
         access_token: grant_id,
         refresh_token: tokenData.refresh_token || null,
         token_expires_at: tokenData.expires_in
@@ -157,12 +159,11 @@ Deno.serve(async (req) => {
       } else {
         await serviceDb.from("email_connections").insert({
           company_id,
-          provider: "gmail",
           ...connectionData,
         });
       }
 
-      console.log("Gmail connected successfully for:", email);
+      console.log("Email connected successfully for:", email, "provider:", tokenData.provider);
       return Response.redirect(
         `${APP_URL}/settings?email=connected&address=${encodeURIComponent(email || "")}`,
         302
