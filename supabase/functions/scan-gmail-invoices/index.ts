@@ -396,7 +396,10 @@ Deno.serve(async (req) => {
               messages: [{
                 role: "user",
                 content: [
-                  { type: "image", source: { type: "base64", media_type: att.content_type, data: b64Data } },
+                  // PDFs use "document" type, images use "image" type
+                  (att.content_type || "").toLowerCase().includes("pdf")
+                    ? { type: "document", source: { type: "base64", media_type: "application/pdf", data: b64Data } }
+                    : { type: "image", source: { type: "base64", media_type: att.content_type, data: b64Data } },
                   { type: "text", text: `Analisa este documento e diz-me se é uma fatura. Se sim, extrai: invoice_number, amount (total com IVA), net_amount, vat_amount, issue_date (YYYY-MM-DD), due_date (YYYY-MM-DD), supplier_nif. Responde APENAS em JSON: {"is_invoice": true/false, "invoice_number": "...", "amount": 0, "net_amount": 0, "vat_amount": 0, "issue_date": "...", "due_date": "...", "supplier_nif": "..."}` },
                 ],
               }],
