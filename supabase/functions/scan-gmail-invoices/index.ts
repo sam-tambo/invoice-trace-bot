@@ -198,13 +198,13 @@ Deno.serve(async (req) => {
     let aiCreditsExhausted = false;
 
     // ============================================================
-    // MULTI-PASS SEARCH STRATEGY (aggressive, high recall)
+    // MULTI-PASS SEARCH STRATEGY (per-invoice, high recall)
     // ============================================================
 
     // Collect all unique messages across passes, deduplicated
     interface CandidateMessage {
       msg: any;
-      pass: number; // 1 = invoice number, 2 = supplier email, 3 = supplier name
+      pass: number;
       targetNif: string;
     }
     const candidates: CandidateMessage[] = [];
@@ -215,79 +215,50 @@ Deno.serve(async (req) => {
       candidates.push({ msg, pass, targetNif });
     }
 
-    // --- PASS 1: Search by invoice number terms (multiple strategies) ---
-    // For each invoice, generate multiple search terms and try them
-    const searchTermsMap = new Map<string, { terms: string[], nif: string, invoiceId: string }>();
+    // --- PASS 1: Search EACH invoice number individually ---
+    // This is the most reliable approach — Gmail handles individual searches best
     for (const inv of invoices) {
-      if (!inv.invoice_number) continue;
-      searchTermsMap.set(inv.id, {
-        terms: extractSearchTerms(inv.invoice_number),
-        nif: inv.supplier_nif,
-        invoiceId: inv.id,
-      });
-    }
-
-    // Strategy 1a: Search without quotes (Gmail handles this better with special chars)
-    const allSearchTerms: { term: string, nif: string }[] = [];
-    for (const [, info] of searchTermsMap) {
-      // Use the most distinctive term (usually the number after /)
-      for (const term of info.terms) {
-        allSearchTerms.push({ term, nif: info.nif });
-      }
-    }
-
-    // Deduplicate and batch search terms — use 3 per query for better results
-    const uniqueTerms = [...new Map(allSearchTerms.map(t => [t.term, t])).values()];
-    // Sort by length descending — longer terms are more specific, search them first
-    uniqueTerms.sort((a, b) => b.term.length - a.term.length);
-
-    const termBatches: typeof uniqueTerms[] = [];
-    for (let i = 0; i < uniqueTerms.length; i += 3) {
-      termBatches.push(uniqueTerms.slice(i, i + 3));
-    }
-
-    for (const batch of termBatches) {
-      // Search WITHOUT quotes for better Gmail compatibility with / and special chars
-      const query = batch.map(t => t.term).join(" OR ");
-      console.log(`Pass 1 - Searching: ${query.substring(0, 140)}`);
-      const msgs = await searchNylasMessages(nylasApiKey, grantId, query, 15);
-      for (const msg of msgs) {
-        // Try to associate with a NIF
-        const text = `${msg.subject || ""} ${msg.snippet || ""}`;
-        let matched = false;
-        for (const [nif, nifInvoices] of invoicesByNif) {
-          const nums = nifInvoices.map(i => i.invoice_number);
-          if (findInvoiceNumberInText(text, nums)) {
-            addCandidate(msg, 1, nif);
-            matched = true;
-            break;
-          }
+      if (!inv.invoice_number || matchedInvoiceIds.has(inv.id)) continue;
+      const terms = extractSearchTerms(inv.invoice_number);
+      
+      // Try each search term individually, starting from most specific
+      // Sort by length desc (longer = more specific)
+      const sortedTerms = [...new Set(terms)].sort((a, b) => b.length - a.length);
+      
+      for (const term of sortedTerms) {
+        // Skip very short terms (< 4 chars) to avoid noise
+        if (term.length < 4) continue;
+        
+        const query = `${term}`;
+        console.log(`Pass 1 - Invoice ${inv.invoice_number} → searching: "${term}"`);
+        const msgs = await searchNylasMessages(nylasApiKey, grantId, query, 10);
+        if (msgs.length > 0) {
+          console.log(`  Found ${msgs.length} emails for term "${term}"`);
+          for (const msg of msgs) addCandidate(msg, 1, inv.supplier_nif);
+          break; // Found results for this invoice, no need to try other terms
         }
-        if (!matched) addCandidate(msg, 1, "");
       }
     }
 
-    // --- PASS 2: Search by supplier email + has:attachment ---
-    // Also search by supplier domain (not just from:full-email)
+    // --- PASS 2: Search by supplier email/domain + has:attachment ---
     for (const [nif, nifInvoices] of invoicesByNif) {
+      const remaining = nifInvoices.filter(i => !matchedInvoiceIds.has(i.id));
+      if (remaining.length === 0) continue;
+
       const supplier = supplierMap.get(nif);
       if (!supplier?.email) continue;
 
-      // Extract domain from email for broader matching
       const email = supplier.email;
       const domain = email.includes("@") ? email.split("@").pop() : email.replace(/^@/, "");
       
-      // Skip generic email domains
       const genericDomains = ["gmail.com", "hotmail.com", "outlook.com", "yahoo.com", "live.com", "sapo.pt", "live.com.pt"];
       
       if (domain && !genericDomains.includes(domain!)) {
-        // Search by domain — catches all emails from that company
         const query = `from:${domain} has:attachment`;
         console.log(`Pass 2a - Searching by domain for NIF ${nif}: ${query}`);
         const msgs = await searchNylasMessages(nylasApiKey, grantId, query, 10);
         for (const msg of msgs) addCandidate(msg, 2, nif);
       } else if (email.includes("@")) {
-        // For generic domains, use full email address
         const query = `from:${email} has:attachment`;
         console.log(`Pass 2b - Searching by email for NIF ${nif}: ${query}`);
         const msgs = await searchNylasMessages(nylasApiKey, grantId, query, 10);
@@ -295,9 +266,8 @@ Deno.serve(async (req) => {
       }
     }
 
-    // --- PASS 3: Search by supplier name (for ALL suppliers, not just those without email) ---
+    // --- PASS 3: Search by supplier name + has:attachment ---
     for (const [nif, nifInvoices] of invoicesByNif) {
-      // Skip if we already have candidates for all invoices of this NIF
       const remaining = nifInvoices.filter(i => !matchedInvoiceIds.has(i.id));
       if (remaining.length === 0) continue;
       
@@ -305,8 +275,7 @@ Deno.serve(async (req) => {
       const name = supplier?.name || supplier?.legal_name || nifInvoices[0]?.supplier_name;
       if (!name) continue;
 
-      // Use a shorter, more searchable version of the name
-      const shortName = name.split(/[,\-]/).map(p => p.trim()).filter(Boolean)[0] || name;
+      const shortName = name.split(/[,\-]/).map((p: string) => p.trim()).filter(Boolean)[0] || name;
       const query = `${shortName} has:attachment`;
       console.log(`Pass 3 - Searching by name for NIF ${nif}: ${query.substring(0, 100)}`);
       const msgs = await searchNylasMessages(nylasApiKey, grantId, query, 8);
@@ -323,13 +292,15 @@ Deno.serve(async (req) => {
     for (const candidate of candidates) {
       const { msg, pass, targetNif } = candidate;
 
-      // Get full message for attachments and body
-      const fullMsg = msg.attachments ? msg : await getNylasMessage(nylasApiKey, grantId, msg.id);
-      if (!fullMsg) continue;
+      // ALWAYS fetch full message to get complete body text (search results have truncated snippets)
+      const fullMsg = await getNylasMessage(nylasApiKey, grantId, msg.id) || msg;
 
       const subject = fullMsg.subject || "";
       const snippet = fullMsg.snippet || msg.snippet || "";
-      const bodyText = fullMsg.body?.text || fullMsg.body || "";
+      // Nylas v3: body can be a string (HTML) or object; extract text either way
+      const bodyRaw = typeof fullMsg.body === "string" ? fullMsg.body : (fullMsg.body?.text || fullMsg.body?.html || "");
+      // Strip HTML tags for plain text matching
+      const bodyText = bodyRaw.replace(/<[^>]+>/g, " ");
       const combinedText = `${subject} ${snippet} ${bodyText}`;
 
       // --- Step A: Non-AI text matching (fast, free, most common case) ---
@@ -441,6 +412,16 @@ Deno.serve(async (req) => {
         const fileBuffer = new Uint8Array(fileData);
         const b64Data = uint8ToBase64(fileBuffer);
 
+        // Skip unsupported content types for AI
+        const ct = (att.content_type || "").toLowerCase();
+        const isPdf = ct.includes("pdf");
+        const supportedImages = ["image/jpeg", "image/png", "image/gif", "image/webp"];
+        const isImage = supportedImages.some(s => ct.includes(s.split("/")[1]));
+        if (!isPdf && !isImage) {
+          console.log(`Skipping unsupported content type for AI: ${att.content_type} (${att.filename})`);
+          continue;
+        }
+
         try {
           const aiRes = await fetch("https://api.anthropic.com/v1/messages", {
             method: "POST",
@@ -455,10 +436,9 @@ Deno.serve(async (req) => {
               messages: [{
                 role: "user",
                 content: [
-                  // PDFs use "document" type, images use "image" type
-                  (att.content_type || "").toLowerCase().includes("pdf")
+                  isPdf
                     ? { type: "document", source: { type: "base64", media_type: "application/pdf", data: b64Data } }
-                    : { type: "image", source: { type: "base64", media_type: att.content_type, data: b64Data } },
+                    : { type: "image", source: { type: "base64", media_type: supportedImages.find(s => ct.includes(s.split("/")[1]))!, data: b64Data } },
                   { type: "text", text: `Analisa este documento e diz-me se é uma fatura. Se sim, extrai: invoice_number, amount (total com IVA), net_amount, vat_amount, issue_date (YYYY-MM-DD), due_date (YYYY-MM-DD), supplier_nif. Responde APENAS em JSON: {"is_invoice": true/false, "invoice_number": "...", "amount": 0, "net_amount": 0, "vat_amount": 0, "issue_date": "...", "due_date": "...", "supplier_nif": "..."}` },
                 ],
               }],
