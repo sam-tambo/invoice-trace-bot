@@ -235,6 +235,16 @@ export default function InvoiceContactDialog({ invoice, onClose, onStatusChange 
         </DialogHeader>
 
         <div className="space-y-4">
+          {/* Scanned image preview */}
+          {invoice.raw_image_url && (
+            <div className="space-y-1">
+              <h4 className="text-sm font-semibold">Imagem da Fatura</h4>
+              <a href={invoice.raw_image_url} target="_blank" rel="noopener noreferrer">
+                <img src={invoice.raw_image_url} alt="Fatura digitalizada" className="w-full rounded-lg object-contain max-h-64 border" />
+              </a>
+            </div>
+          )}
+
           {/* Invoice details */}
           <div className="grid grid-cols-2 gap-4 text-sm">
             <div><span className="text-muted-foreground">Fornecedor:</span> {invoice.supplier_name}</div>
@@ -266,6 +276,9 @@ export default function InvoiceContactDialog({ invoice, onClose, onStatusChange 
                 </SelectContent>
               </Select>
             </div>
+            {invoice.source && (
+              <div><span className="text-muted-foreground">Origem:</span> {invoice.source === "scan" ? "📷 Digitalização" : invoice.source === "email" ? "📧 Email" : "✍️ Manual"}</div>
+            )}
           </div>
 
           {/* Contact buttons */}
