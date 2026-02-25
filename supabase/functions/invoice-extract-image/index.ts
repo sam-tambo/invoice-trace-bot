@@ -22,7 +22,7 @@ Deno.serve(async (req) => {
 
     const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
     const supabaseAnonKey = Deno.env.get("SUPABASE_ANON_KEY")!;
-    const anthropicKey = Deno.env.get("ANTHROPIC_API_KEY")!;
+    const lovableApiKey = Deno.env.get("LOVABLE_API_KEY")!;
 
     const supabase = createClient(supabaseUrl, supabaseAnonKey, {
       global: { headers: { Authorization: authHeader } },
@@ -63,32 +63,8 @@ Deno.serve(async (req) => {
       });
     }
 
-    // Call Anthropic Claude Vision
-    const anthropicRes = await fetch("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      headers: {
-        "x-api-key": anthropicKey,
-        "anthropic-version": "2023-06-01",
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        model: "claude-sonnet-4-20250514",
-        max_tokens: 2048,
-        messages: [
-          {
-            role: "user",
-            content: [
-              {
-                type: "image",
-                source: {
-                  type: "base64",
-                  media_type: media_type || "image/jpeg",
-                  data: image_base64,
-                },
-              },
-              {
-                type: "text",
-                text: `Analisa esta imagem de uma fatura portuguesa. Extrai os seguintes campos e responde APENAS com JSON válido, sem texto adicional:
+    // Call Lovable AI (Gemini Vision) for extraction
+    const prompt = `Analisa esta imagem de uma fatura portuguesa. Extrai os seguintes campos e responde APENAS com JSON válido, sem texto adicional:
 
 {
   "supplier_name": "Nome do fornecedor",
@@ -103,28 +79,52 @@ Deno.serve(async (req) => {
   "notes": "Notas sobre campos incertos"
 }
 
-Se um campo não for legível, coloca null. O campo "amount" é o total com IVA. O campo "confidence" indica a confiança geral da extração.`,
+Se um campo não for legível, coloca null. O campo "amount" é o total com IVA. O campo "confidence" indica a confiança geral da extração.`;
+
+    const aiRes = await fetch("https://api.lovable.dev/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${lovableApiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: "google/gemini-2.5-flash",
+        messages: [
+          {
+            role: "user",
+            content: [
+              {
+                type: "image_url",
+                image_url: {
+                  url: `data:${media_type || "image/jpeg"};base64,${image_base64}`,
+                },
+              },
+              {
+                type: "text",
+                text: prompt,
               },
             ],
           },
         ],
+        max_tokens: 2048,
       }),
     });
 
-    if (!anthropicRes.ok) {
-      const errText = await anthropicRes.text();
-      console.error("Anthropic API error:", anthropicRes.status, errText);
+    if (!aiRes.ok) {
+      const errText = await aiRes.text();
+      console.error("Lovable AI error:", aiRes.status, errText);
       return new Response(JSON.stringify({ error: "AI extraction failed" }), {
         status: 500,
         headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
     }
 
-    const aiResult = await anthropicRes.json();
-    const textContent = aiResult.content?.[0]?.text || "";
+    const aiResult = await aiRes.json();
+    const textContent = aiResult.choices?.[0]?.message?.content || "";
     const jsonMatch = textContent.match(/\{[\s\S]*\}/);
 
     if (!jsonMatch) {
+      console.error("Could not parse AI response:", textContent);
       return new Response(JSON.stringify({ error: "Could not parse AI response" }), {
         status: 500,
         headers: { ...corsHeaders, "Content-Type": "application/json" },
