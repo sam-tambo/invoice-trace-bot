@@ -90,12 +90,11 @@ Deno.serve(async (req) => {
       .from("email_connections")
       .select("*")
       .eq("company_id", company_id)
-      .eq("provider", "gmail")
       .maybeSingle();
 
     if (!conn || !conn.access_token) {
       return new Response(
-        JSON.stringify({ error: "Gmail não ligado. Ligue primeiro nas Definições." }),
+        JSON.stringify({ error: "Email não ligado. Ligue primeiro nas Definições." }),
         { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
       );
     }
