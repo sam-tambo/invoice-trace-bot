@@ -4,6 +4,7 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
 import { AuthProvider, useAuth } from "@/hooks/useAuth";
+import Landing from "@/pages/Landing";
 import { CompanyProvider, useCompany } from "@/hooks/useCompany";
 import AppLayout from "@/components/AppLayout";
 import Auth from "@/pages/Auth";
@@ -52,7 +53,7 @@ const OnboardingRoute = () => {
   }
 
   if (!user) return <Navigate to="/auth" replace />;
-  if (companies.length > 0) return <Navigate to="/" replace />;
+  if (companies.length > 0) return <Navigate to="/dashboard" replace />;
   return <Onboarding />;
 };
 
@@ -69,11 +70,11 @@ const AppRoutes = () => {
 
   return (
     <Routes>
-      <Route path="/auth" element={user ? <Navigate to="/" replace /> : <Auth />} />
+      <Route path="/auth" element={user ? <Navigate to="/dashboard" replace /> : <Auth />} />
       <Route path="/reset-password" element={<ResetPassword />} />
       <Route path="/onboarding" element={<OnboardingRoute />} />
-      <Route path="/" element={<ProtectedRoute><Dashboard /></ProtectedRoute>} />
-      <Route path="/invoices" element={<ProtectedRoute><Invoices /></ProtectedRoute>} />
+      <Route path="/" element={user ? <Navigate to="/dashboard" replace /> : <Landing />} />
+      <Route path="/dashboard" element={<ProtectedRoute><Dashboard /></ProtectedRoute>} />
       <Route path="/import" element={<ProtectedRoute><ImportInvoices /></ProtectedRoute>} />
       <Route path="/suppliers" element={<ProtectedRoute><Suppliers /></ProtectedRoute>} />
       <Route path="/templates" element={<ProtectedRoute><Templates /></ProtectedRoute>} />

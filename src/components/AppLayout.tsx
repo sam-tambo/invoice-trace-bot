@@ -26,7 +26,7 @@ import { useState } from "react";
 import { cn } from "@/lib/utils";
 
 const navItems = [
-  { href: "/", label: "Painel", icon: LayoutDashboard },
+  { href: "/dashboard", label: "Painel", icon: LayoutDashboard },
   { href: "/invoices", label: "Faturas", icon: FileText },
   { href: "/import", label: "Importar", icon: Upload },
   { href: "/suppliers", label: "Fornecedores", icon: Building2 },
