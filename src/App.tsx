@@ -77,6 +77,7 @@ const AppRoutes = () => {
       <Route path="/onboarding" element={<OnboardingRoute />} />
       <Route path="/" element={user ? <Navigate to="/dashboard" replace /> : <Landing />} />
       <Route path="/dashboard" element={<ProtectedRoute><Dashboard /></ProtectedRoute>} />
+      <Route path="/invoices" element={<ProtectedRoute><Invoices /></ProtectedRoute>} />
       <Route path="/scan" element={<ProtectedRoute><ScanInvoice /></ProtectedRoute>} />
       <Route path="/calendar" element={<ProtectedRoute><InvoiceCalendar /></ProtectedRoute>} />
       <Route path="/import" element={<ProtectedRoute><ImportInvoices /></ProtectedRoute>} />
