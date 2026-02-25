@@ -164,9 +164,15 @@ const Auth = () => {
             disabled={googleLoading}
             onClick={async () => {
               setGoogleLoading(true);
-              const redirectUri = window.location.origin.includes('lovable.app')
-                ? window.location.origin
-                : 'https://invoice-trace-bot.lovable.app';
+              // On mobile browsers, always use the published domain for reliable OAuth redirect
+              const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
+              const origin = window.location.origin;
+              const isStandardLovable = origin.includes('lovable.app');
+              const redirectUri = isMobile
+                ? 'https://invoice-trace-bot.lovable.app'
+                : isStandardLovable
+                  ? origin
+                  : 'https://invoice-trace-bot.lovable.app';
               const { error } = await lovable.auth.signInWithOAuth("google", {
                 redirect_uri: redirectUri,
               });
