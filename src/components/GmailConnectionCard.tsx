@@ -1,14 +1,11 @@
-import { useEffect, useState, useCallback, useRef } from "react";
+import { useEffect, useState, useCallback } from "react";
 import { supabase } from "@/integrations/supabase/client";
 import { useCompany } from "@/hooks/useCompany";
 import { useAuth } from "@/hooks/useAuth";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { useToast } from "@/hooks/use-toast";
-import { Mail, Link2, Unlink, Loader2 } from "lucide-react";
-
-const GMAIL_CODE_KEY = "gmail_oauth_code";
-const GMAIL_REDIRECT_URI_KEY = "gmail_oauth_redirect_uri";
+import { Mail, Link2, Unlink, Loader2, CheckCircle2, AlertCircle } from "lucide-react";
 
 const GmailConnectionCard = () => {
   const { selectedCompany } = useCompany();
@@ -17,8 +14,6 @@ const GmailConnectionCard = () => {
   const [connection, setConnection] = useState<any>(null);
   const [loading, setLoading] = useState(true);
   const [connecting, setConnecting] = useState(false);
-  const [clientId, setClientId] = useState("");
-  const callbackProcessed = useRef(false);
 
   const fetchConnection = useCallback(async () => {
     if (!selectedCompany) return;
@@ -33,116 +28,75 @@ const GmailConnectionCard = () => {
     setLoading(false);
   }, [selectedCompany]);
 
-  // Fetch Nylas Client ID from edge function
-  useEffect(() => {
-    const fetchClientId = async () => {
-      try {
-        const projectId = import.meta.env.VITE_SUPABASE_PROJECT_ID;
-        const res = await fetch(
-          `https://${projectId}.supabase.co/functions/v1/gmail-auth-callback`,
-          { method: "GET" }
-        );
-        const data = await res.json();
-        if (data.client_id) setClientId(data.client_id);
-      } catch (e) {
-        console.error("Failed to fetch Nylas Client ID:", e);
-      }
-    };
-    fetchClientId();
-  }, []);
-
   useEffect(() => {
     fetchConnection();
   }, [fetchConnection]);
 
-  // Save code from URL to sessionStorage immediately (before any redirect can strip it)
+  // Handle Nylas callback result from URL params
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
-    const code = params.get("code");
-    if (code) {
-      console.log("Gmail OAuth code detected in URL, saving to sessionStorage");
-      sessionStorage.setItem(GMAIL_CODE_KEY, code);
-      // Clean URL immediately
+    const emailStatus = params.get("email");
+    
+    if (emailStatus === "connected") {
+      const address = params.get("address");
+      toast({ 
+        title: "Gmail ligado com sucesso!", 
+        description: address ? `Conta: ${address}` : "A conta foi ligada." 
+      });
+      window.history.replaceState({}, "", window.location.pathname);
+      fetchConnection();
+    } else if (emailStatus === "denied") {
+      toast({ 
+        title: "Autorização negada", 
+        description: "Não autorizou o acesso ao Gmail.", 
+        variant: "destructive" 
+      });
+      window.history.replaceState({}, "", window.location.pathname);
+    } else if (emailStatus === "error") {
+      const reason = params.get("reason");
+      toast({ 
+        title: "Erro ao ligar Gmail", 
+        description: reason || "Tente novamente.", 
+        variant: "destructive" 
+      });
       window.history.replaceState({}, "", window.location.pathname);
     }
   }, []);
 
-  // Process saved code once user and company are ready
-  useEffect(() => {
-    const savedCode = sessionStorage.getItem(GMAIL_CODE_KEY);
-    if (savedCode && selectedCompany && user && !callbackProcessed.current) {
-      callbackProcessed.current = true;
-      console.log("Processing saved Gmail OAuth code for company:", selectedCompany.id);
-      handleCallback(savedCode);
-    }
-  }, [selectedCompany, user]);
-
-  const handleCallback = async (code: string) => {
-    if (!selectedCompany) return;
+  const connectGmail = async () => {
+    if (!selectedCompany || !user) return;
     setConnecting(true);
 
-    // Clear saved data IMMEDIATELY to prevent double-processing on remount
-    const redirectUri = sessionStorage.getItem(GMAIL_REDIRECT_URI_KEY) || `${window.location.origin}/settings`;
-    sessionStorage.removeItem(GMAIL_CODE_KEY);
-    sessionStorage.removeItem(GMAIL_REDIRECT_URI_KEY);
-
-    console.log("Exchanging Gmail code with redirect_uri:", redirectUri, "company:", selectedCompany.id);
-
     try {
+      // Call the edge function to get the Nylas auth URL
       const { data, error } = await supabase.functions.invoke("gmail-auth-callback", {
-        body: { code, redirect_uri: redirectUri, company_id: selectedCompany.id },
+        body: { company_id: selectedCompany.id },
       });
-
-      console.log("Gmail callback response:", { data, error });
 
       if (error) throw error;
       if (data?.error) throw new Error(data.error);
+      if (!data?.url) throw new Error("No auth URL returned");
 
-      toast({ title: "Gmail ligado!", description: `Conta: ${data.email_address}` });
-      fetchConnection();
+      // Redirect to Nylas hosted auth
+      const isInIframe = window.self !== window.top;
+      if (isInIframe) {
+        window.open(data.url, "_blank");
+        toast({
+          title: "Gmail a abrir...",
+          description: "Autentica no separador que abriu. Depois volta aqui e recarrega a página.",
+        });
+      } else {
+        window.location.href = data.url;
+      }
     } catch (err: any) {
-      console.error("Gmail callback error:", err);
-      toast({ title: "Erro ao ligar Gmail", description: err.message, variant: "destructive" });
+      console.error("Connect Gmail error:", err);
+      toast({ 
+        title: "Erro ao iniciar ligação", 
+        description: err.message, 
+        variant: "destructive" 
+      });
     } finally {
       setConnecting(false);
-    }
-  };
-
-  const connectGmail = () => {
-    if (!clientId) {
-      toast({
-        title: "Configuração em falta",
-        description: "NYLAS_CLIENT_ID não está configurado.",
-        variant: "destructive",
-      });
-      return;
-    }
-
-    // Use current origin — the redirect must come back to THIS domain
-    const redirectUri = `${window.location.origin}/settings`;
-    // Persist redirect_uri so the callback exchange uses the exact same value
-    sessionStorage.setItem(GMAIL_REDIRECT_URI_KEY, redirectUri);
-    
-    // Nylas Hosted Auth URL
-    const url = new URL("https://api.us.nylas.com/v3/connect/auth");
-    url.searchParams.set("client_id", clientId);
-    url.searchParams.set("redirect_uri", redirectUri);
-    url.searchParams.set("response_type", "code");
-    url.searchParams.set("access_type", "offline");
-    url.searchParams.set("provider", "google");
-    url.searchParams.set("code_challenge", "nylas");
-    url.searchParams.set("code_challenge_method", "plain");
-
-    // If inside an iframe (Lovable preview), open in new tab instead of breaking the editor
-    const isInIframe = window.self !== window.top;
-    if (isInIframe) {
-      window.open(url.toString(), "_blank");
-      toast({
-        title: "Gmail a abrir...",
-        description: "Autentica no separador que abriu. Depois volta aqui e recarrega a página.",
-      });
-    } else {
-      window.location.href = url.toString();
     }
   };
 
@@ -181,7 +135,7 @@ const GmailConnectionCard = () => {
         ) : connection ? (
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2">
-              <div className="h-2 w-2 rounded-full bg-success" />
+              <CheckCircle2 className="h-4 w-4 text-green-500" />
               <span className="text-sm">{connection.email_address || "Ligado"}</span>
             </div>
             <Button variant="outline" size="sm" onClick={disconnectGmail}>

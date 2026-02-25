@@ -6,125 +6,172 @@ const corsHeaders = {
     "authorization, x-client-info, apikey, content-type, x-supabase-client-platform, x-supabase-client-platform-version, x-supabase-client-runtime, x-supabase-client-runtime-version",
 };
 
+const NYLAS_API_KEY = Deno.env.get("NYLAS_API_KEY") || "";
+const NYLAS_CLIENT_ID = Deno.env.get("NYLAS_CLIENT_ID") || "";
+const NYLAS_CALLBACK_URI = Deno.env.get("NYLAS_CALLBACK_URI") || "";
+const APP_URL = "https://invoice-trace-bot.lovable.app";
+
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") {
     return new Response(null, { headers: corsHeaders });
   }
 
-  // GET: return Nylas Client ID + auth URL info
+  const url = new URL(req.url);
+
+  // ── POST: Frontend calls this to get the Nylas auth URL ──
+  if (req.method === "POST") {
+    try {
+      const authHeader = req.headers.get("Authorization");
+      if (!authHeader?.startsWith("Bearer ")) {
+        return new Response(JSON.stringify({ error: "Unauthorized" }), {
+          status: 401,
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        });
+      }
+
+      const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
+      const supabaseAnonKey = Deno.env.get("SUPABASE_ANON_KEY")!;
+      const supabase = createClient(supabaseUrl, supabaseAnonKey, {
+        global: { headers: { Authorization: authHeader } },
+      });
+
+      const { data: { user }, error: userError } = await supabase.auth.getUser();
+      if (userError || !user) {
+        return new Response(JSON.stringify({ error: "Unauthorized" }), {
+          status: 401,
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        });
+      }
+
+      const body = await req.json();
+      const companyId = body.company_id;
+      if (!companyId) {
+        return new Response(JSON.stringify({ error: "Missing company_id" }), {
+          status: 400,
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        });
+      }
+
+      // Encode user_id + company_id in state
+      const state = btoa(JSON.stringify({ user_id: user.id, company_id: companyId }));
+
+      const authUrl = new URL("https://api.us.nylas.com/v3/connect/auth");
+      authUrl.searchParams.set("client_id", NYLAS_CLIENT_ID);
+      authUrl.searchParams.set("redirect_uri", NYLAS_CALLBACK_URI);
+      authUrl.searchParams.set("response_type", "code");
+      authUrl.searchParams.set("state", state);
+      authUrl.searchParams.set("access_type", "offline");
+      authUrl.searchParams.set("provider", "google");
+
+      console.log("Generated Nylas auth URL with redirect_uri:", NYLAS_CALLBACK_URI);
+
+      return new Response(JSON.stringify({ url: authUrl.toString() }), {
+        status: 200,
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
+    } catch (err) {
+      console.error("Auth init error:", err);
+      return new Response(JSON.stringify({ error: String(err) }), {
+        status: 500,
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
+    }
+  }
+
+  // ── GET: Nylas redirects here after user authorizes ──
   if (req.method === "GET") {
-    const clientId = Deno.env.get("NYLAS_CLIENT_ID") || "";
-    return new Response(
-      JSON.stringify({ client_id: clientId }),
-      { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-    );
-  }
+    const code = url.searchParams.get("code");
+    const state = url.searchParams.get("state");
+    const error = url.searchParams.get("error");
 
-  // POST: exchange Nylas auth code for grant_id
-  try {
-    const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
-    const supabaseAnonKey = Deno.env.get("SUPABASE_ANON_KEY")!;
-    const nylasApiKey = Deno.env.get("NYLAS_API_KEY")!;
-    const nylasClientId = Deno.env.get("NYLAS_CLIENT_ID")!;
-
-    const authHeader = req.headers.get("Authorization");
-    if (!authHeader?.startsWith("Bearer ")) {
-      return new Response(JSON.stringify({ error: "Unauthorized" }), {
-        status: 401,
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
-      });
-    }
-
-    const supabase = createClient(supabaseUrl, supabaseAnonKey, {
-      global: { headers: { Authorization: authHeader } },
-    });
-    const { data: { user: authUser }, error: userError } = await supabase.auth.getUser();
-    if (userError || !authUser) {
-      console.error("Auth error:", userError);
-      return new Response(JSON.stringify({ error: "Unauthorized" }), {
-        status: 401,
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
-      });
-    }
-    const userId = authUser.id;
-
-    const { code, redirect_uri, company_id } = await req.json();
-
-    if (!code || !redirect_uri || !company_id) {
+    // If no code/state params, return client_id (legacy support)
+    if (!code && !state && !error) {
       return new Response(
-        JSON.stringify({ error: "Missing code, redirect_uri, or company_id" }),
-        { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        JSON.stringify({ client_id: NYLAS_CLIENT_ID }),
+        { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } }
       );
     }
 
-    // Exchange Nylas auth code for tokens + grant_id
-    const tokenRes = await fetch("https://api.us.nylas.com/v3/connect/token", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        code,
-        client_id: nylasClientId,
-        client_secret: nylasApiKey,
-        redirect_uri,
-        grant_type: "authorization_code",
-        code_verifier: "nylas",
-      }),
-    });
-
-    const tokenData = await tokenRes.json();
-    if (tokenData.error || !tokenData.grant_id) {
-      console.error("Nylas token exchange error:", tokenData);
-      return new Response(
-        JSON.stringify({ error: tokenData.error_description || tokenData.error || "Failed to exchange code" }),
-        { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-      );
+    if (error) {
+      console.error("Nylas auth error:", error);
+      return Response.redirect(`${APP_URL}/settings?email=denied&reason=${error}`, 302);
     }
 
-    const { grant_id, email, access_token, refresh_token, expires_in } = tokenData;
-    const tokenExpiresAt = expires_in
-      ? new Date(Date.now() + expires_in * 1000).toISOString()
-      : null;
+    if (!code || !state) {
+      return Response.redirect(`${APP_URL}/settings?email=error&reason=missing_params`, 302);
+    }
 
-    // Upsert email_connection — store grant_id in refresh_token field for reuse
-    const serviceDb = createClient(supabaseUrl, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!);
+    try {
+      const { user_id, company_id } = JSON.parse(atob(state));
+      console.log("Processing Nylas callback for user:", user_id, "company:", company_id);
 
-    const { data: existing } = await serviceDb
-      .from("email_connections")
-      .select("id")
-      .eq("company_id", company_id)
-      .eq("provider", "gmail")
-      .maybeSingle();
+      // Exchange code for Nylas grant — NO code_verifier since we didn't send code_challenge
+      const tokenRes = await fetch("https://api.us.nylas.com/v3/connect/token", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          client_id: NYLAS_CLIENT_ID,
+          client_secret: NYLAS_API_KEY,
+          redirect_uri: NYLAS_CALLBACK_URI,
+          code,
+          grant_type: "authorization_code",
+        }),
+      });
 
-    const connectionData = {
-      user_id: userId,
-      access_token: grant_id, // Store grant_id as primary identifier
-      refresh_token: refresh_token || null,
-      token_expires_at: tokenExpiresAt,
-      email_address: email || null,
-    };
+      const tokenData = await tokenRes.json();
+      console.log("Nylas token exchange response status:", tokenRes.status, "has grant_id:", !!tokenData.grant_id);
 
-    if (existing) {
-      await serviceDb
+      if (!tokenData.grant_id) {
+        console.error("Nylas token exchange failed:", JSON.stringify(tokenData));
+        const reason = tokenData.error_description || tokenData.error || "token_exchange_failed";
+        return Response.redirect(`${APP_URL}/settings?email=error&reason=${encodeURIComponent(reason)}`, 302);
+      }
+
+      const { grant_id, email } = tokenData;
+
+      // Save to DB using service role
+      const serviceDb = createClient(
+        Deno.env.get("SUPABASE_URL")!,
+        Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!
+      );
+
+      const { data: existing } = await serviceDb
         .from("email_connections")
-        .update(connectionData)
-        .eq("id", existing.id);
-    } else {
-      await serviceDb.from("email_connections").insert({
-        company_id,
-        provider: "gmail",
-        ...connectionData,
-      });
-    }
+        .select("id")
+        .eq("company_id", company_id)
+        .eq("provider", "gmail")
+        .maybeSingle();
 
-    return new Response(
-      JSON.stringify({ success: true, email_address: email, grant_id }),
-      { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-    );
-  } catch (err) {
-    console.error("gmail-auth-callback error:", err);
-    return new Response(JSON.stringify({ error: String(err) }), {
-      status: 500,
-      headers: { ...corsHeaders, "Content-Type": "application/json" },
-    });
+      const connectionData = {
+        user_id,
+        access_token: grant_id,
+        refresh_token: tokenData.refresh_token || null,
+        token_expires_at: tokenData.expires_in
+          ? new Date(Date.now() + tokenData.expires_in * 1000).toISOString()
+          : null,
+        email_address: email || null,
+      };
+
+      if (existing) {
+        await serviceDb.from("email_connections").update(connectionData).eq("id", existing.id);
+      } else {
+        await serviceDb.from("email_connections").insert({
+          company_id,
+          provider: "gmail",
+          ...connectionData,
+        });
+      }
+
+      console.log("Gmail connected successfully for:", email);
+      return Response.redirect(
+        `${APP_URL}/settings?email=connected&address=${encodeURIComponent(email || "")}`,
+        302
+      );
+    } catch (err) {
+      console.error("Nylas callback error:", err);
+      return Response.redirect(`${APP_URL}/settings?email=error&reason=${encodeURIComponent(String(err))}`, 302);
+    }
   }
+
+  return new Response("Method not allowed", { status: 405 });
 });
