@@ -9,7 +9,7 @@ const corsHeaders = {
 const NYLAS_BASE = "https://api.us.nylas.com/v3";
 
 async function searchNylasMessages(apiKey: string, grantId: string, query: string, requireAttachments = false): Promise<any[]> {
-  const url = `${NYLAS_BASE}/grants/${grantId}/messages?q=${encodeURIComponent(query)}${requireAttachments ? '&has_attachments=true' : ''}&limit=15`;
+  const url = `${NYLAS_BASE}/grants/${grantId}/messages?search_query_native=${encodeURIComponent(query)}${requireAttachments ? '&has_attachments=true' : ''}&limit=15`;
   const res = await fetch(url, {
     headers: { Authorization: `Bearer ${apiKey}`, Accept: "application/json" },
   });
