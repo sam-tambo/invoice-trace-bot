@@ -518,49 +518,97 @@ export type Database = {
       }
       suppliers: {
         Row: {
+          activity_description: string | null
           address: string | null
+          alias: string | null
           cached_at: string | null
           cached_data: Json | null
+          cae: string | null
+          city: string | null
           company_id: string
           confidence_score: number | null
+          county: string | null
           created_at: string
           email: string | null
+          fax: string | null
           id: string
+          last_lookup_at: string | null
           legal_name: string | null
+          legal_nature: string | null
+          lookup_success: boolean | null
           name: string
           nif: string
+          nif_pt_url: string | null
           phone: string | null
+          postal_code: string | null
+          region: string | null
+          share_capital: number | null
+          share_capital_currency: string | null
+          status: string | null
           updated_at: string
+          website: string | null
         }
         Insert: {
+          activity_description?: string | null
           address?: string | null
+          alias?: string | null
           cached_at?: string | null
           cached_data?: Json | null
+          cae?: string | null
+          city?: string | null
           company_id: string
           confidence_score?: number | null
+          county?: string | null
           created_at?: string
           email?: string | null
+          fax?: string | null
           id?: string
+          last_lookup_at?: string | null
           legal_name?: string | null
+          legal_nature?: string | null
+          lookup_success?: boolean | null
           name?: string
           nif: string
+          nif_pt_url?: string | null
           phone?: string | null
+          postal_code?: string | null
+          region?: string | null
+          share_capital?: number | null
+          share_capital_currency?: string | null
+          status?: string | null
           updated_at?: string
+          website?: string | null
         }
         Update: {
+          activity_description?: string | null
           address?: string | null
+          alias?: string | null
           cached_at?: string | null
           cached_data?: Json | null
+          cae?: string | null
+          city?: string | null
           company_id?: string
           confidence_score?: number | null
+          county?: string | null
           created_at?: string
           email?: string | null
+          fax?: string | null
           id?: string
+          last_lookup_at?: string | null
           legal_name?: string | null
+          legal_nature?: string | null
+          lookup_success?: boolean | null
           name?: string
           nif?: string
+          nif_pt_url?: string | null
           phone?: string | null
+          postal_code?: string | null
+          region?: string | null
+          share_capital?: number | null
+          share_capital_currency?: string | null
+          status?: string | null
           updated_at?: string
+          website?: string | null
         }
         Relationships: [
           {
