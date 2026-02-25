@@ -230,6 +230,7 @@ Deno.serve(async (req) => {
               .from("invoices")
               .update({
                 status: "received",
+                source: "email",
                 amount: parsed.amount || undefined,
                 net_amount: parsed.net_amount || undefined,
                 vat_amount: parsed.vat_amount || undefined,
@@ -247,6 +248,40 @@ Deno.serve(async (req) => {
               file_size: fileBuffer.length,
               uploaded_by: conn.user_id || "00000000-0000-0000-0000-000000000000",
             });
+          } else if (parsed.invoice_number) {
+            // Create new invoice from unmatched email attachment
+            const { data: newInvoice } = await db
+              .from("invoices")
+              .insert({
+                company_id: companyId,
+                created_by: conn.user_id,
+                supplier_name: supplier?.name || "Desconhecido",
+                supplier_nif: matchNif || "",
+                invoice_number: parsed.invoice_number,
+                issue_date: parsed.issue_date || null,
+                due_date: parsed.due_date || null,
+                net_amount: parsed.net_amount || null,
+                vat_amount: parsed.vat_amount || null,
+                amount: parsed.amount || null,
+                status: "received",
+                source: "email",
+                supplier_id: supplier?.id || null,
+              })
+              .select("id")
+              .single();
+
+            if (newInvoice) {
+              matchedInvoiceId = newInvoice.id;
+              await db.from("attachments").insert({
+                company_id: companyId,
+                invoice_id: newInvoice.id,
+                file_name: att.filename || "attachment",
+                file_path: filePath,
+                file_type: att.content_type,
+                file_size: fileBuffer.length,
+                uploaded_by: conn.user_id || "00000000-0000-0000-0000-000000000000",
+              });
+            }
           }
         } catch (aiErr) {
           console.error("AI parsing error:", aiErr);

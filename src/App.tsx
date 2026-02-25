@@ -18,6 +18,8 @@ import Templates from "@/pages/Templates";
 import SettingsPage from "@/pages/Settings";
 import Inbox from "@/pages/Inbox";
 import SharedInvoices from "@/pages/SharedInvoices";
+import ScanInvoice from "@/pages/ScanInvoice";
+import InvoiceCalendar from "@/pages/InvoiceCalendar";
 import NotFound from "@/pages/NotFound";
 
 const queryClient = new QueryClient();
@@ -75,6 +77,8 @@ const AppRoutes = () => {
       <Route path="/onboarding" element={<OnboardingRoute />} />
       <Route path="/" element={user ? <Navigate to="/dashboard" replace /> : <Landing />} />
       <Route path="/dashboard" element={<ProtectedRoute><Dashboard /></ProtectedRoute>} />
+      <Route path="/scan" element={<ProtectedRoute><ScanInvoice /></ProtectedRoute>} />
+      <Route path="/calendar" element={<ProtectedRoute><InvoiceCalendar /></ProtectedRoute>} />
       <Route path="/import" element={<ProtectedRoute><ImportInvoices /></ProtectedRoute>} />
       <Route path="/suppliers" element={<ProtectedRoute><Suppliers /></ProtectedRoute>} />
       <Route path="/templates" element={<ProtectedRoute><Templates /></ProtectedRoute>} />

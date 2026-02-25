@@ -14,6 +14,8 @@ import {
   ChevronDown,
   Menu,
   X,
+  Camera,
+  CalendarDays,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
@@ -27,6 +29,8 @@ import { cn } from "@/lib/utils";
 
 const navItems = [
   { href: "/dashboard", label: "Painel", icon: LayoutDashboard },
+  { href: "/scan", label: "Digitalizar", icon: Camera },
+  { href: "/calendar", label: "Calendário", icon: CalendarDays },
   { href: "/invoices", label: "Faturas", icon: FileText },
   { href: "/import", label: "Importar", icon: Upload },
   { href: "/suppliers", label: "Fornecedores", icon: Building2 },
