@@ -396,14 +396,22 @@ Deno.serve(async (req) => {
         if (foundNum) confidence = "exact_number";
       }
 
-      // Check attachment filenames
-      const attachments = (fullMsg.attachments || []).filter((att: any) => {
+      // Get ALL attachments - don't filter by content_type here, as many invoices
+      // come as application/octet-stream or other generic types
+      const allAttachments = fullMsg.attachments || [];
+      const downloadableAttachments = allAttachments.filter((att: any) => {
         const ct = (att.content_type || "").toLowerCase();
-        return ct.includes("pdf") || ct.includes("image");
+        const fn = (att.filename || "").toLowerCase();
+        // Accept PDFs, images, and any file with a PDF/image extension
+        return ct.includes("pdf") || ct.includes("image") || 
+               ct.includes("octet-stream") || ct.includes("application") ||
+               fn.endsWith(".pdf") || fn.endsWith(".png") || fn.endsWith(".jpg") || 
+               fn.endsWith(".jpeg") || fn.endsWith(".webp");
       });
+      console.log(`  Attachments: ${allAttachments.length} total, ${downloadableAttachments.length} downloadable (types: ${allAttachments.map((a: any) => `${a.filename}[${a.content_type}]`).join(", ")})`);
 
       if (!matchedInvoice) {
-        for (const att of attachments) {
+        for (const att of allAttachments) {
           const filename = att.filename || "";
           for (const [_nif, nifInvoices] of invoicesByNif) {
             const remaining = nifInvoices.filter(i => !matchedInvoiceIds.has(i.id));
@@ -422,30 +430,42 @@ Deno.serve(async (req) => {
       if (matchedInvoice && !matchedInvoiceIds.has(matchedInvoice.id)) {
         let uploadedFilename = "email_match";
 
-        for (const att of attachments) {
+        for (const att of downloadableAttachments) {
           if (att.size && att.size > MAX_ATTACHMENT_SIZE) continue;
           const fileData = await downloadNylasAttachment(nylasApiKey, grantId, att.id, msg.id);
           if (fileData) {
             const fileBuffer = new Uint8Array(fileData);
             const filePath = `${company_id}/${matchedInvoice.supplier_nif}/${Date.now()}_${att.filename}`;
+            const ct = att.content_type || "application/octet-stream";
+            // If content_type is generic but filename suggests PDF, use application/pdf
+            const effectiveCt = (ct.includes("octet-stream") && (att.filename || "").toLowerCase().endsWith(".pdf")) 
+              ? "application/pdf" : ct;
             const { error: uploadErr } = await db.storage.from("invoice-files").upload(filePath, fileBuffer, {
-              contentType: att.content_type, upsert: false,
+              contentType: effectiveCt, upsert: false,
             });
-            if (!uploadErr) {
-              await db.from("attachments").insert({
-                company_id,
-                invoice_id: matchedInvoice.id,
-                file_name: att.filename,
-                file_path: filePath,
-                file_type: att.content_type,
-                file_size: att.size || fileBuffer.length,
-                uploaded_by: authUser.id,
-              });
-              uploadedFilename = att.filename;
-              console.log(`✅ Uploaded "${att.filename}" for ${matchedInvoice.invoice_number}`);
+            if (uploadErr) {
+              console.error(`❌ Upload error for "${att.filename}": ${uploadErr.message}`);
+              continue; // Try next attachment
             }
-            break;
+            await db.from("attachments").insert({
+              company_id,
+              invoice_id: matchedInvoice.id,
+              file_name: att.filename,
+              file_path: filePath,
+              file_type: effectiveCt,
+              file_size: att.size || fileBuffer.length,
+              uploaded_by: authUser.id,
+            });
+            uploadedFilename = att.filename;
+            console.log(`✅ Uploaded "${att.filename}" (${effectiveCt}) for ${matchedInvoice.invoice_number}`);
+            break; // Successfully uploaded one attachment
+          } else {
+            console.error(`❌ Download failed for attachment "${att.filename}" (${att.id})`);
           }
+        }
+        
+        if (uploadedFilename === "email_match" && downloadableAttachments.length === 0 && allAttachments.length > 0) {
+          console.log(`⚠ Invoice ${matchedInvoice.invoice_number}: ${allAttachments.length} attachments but none passed filter. Types: ${allAttachments.map((a: any) => a.content_type).join(", ")}`);
         }
 
         await db.from("invoices").update({ status: "received" }).eq("id", matchedInvoice.id);
@@ -462,12 +482,12 @@ Deno.serve(async (req) => {
       }
 
       // --- AI fallback ---
-      if (aiCreditsExhausted || !anthropicApiKey || attachments.length === 0) continue;
+      if (aiCreditsExhausted || !anthropicApiKey || downloadableAttachments.length === 0) continue;
       if (pass === 3) continue;
 
       const targetNifs = targetNif ? [targetNif] : [...invoicesByNif.keys()];
 
-      for (const att of attachments.slice(0, 2)) {
+      for (const att of downloadableAttachments.slice(0, 2)) {
         if (att.size && att.size > MAX_ATTACHMENT_SIZE) continue;
 
         const fileData = await downloadNylasAttachment(nylasApiKey, grantId, att.id, msg.id);
@@ -477,7 +497,8 @@ Deno.serve(async (req) => {
         const b64Data = uint8ToBase64(fileBuffer);
 
         const ct = (att.content_type || "").toLowerCase();
-        const isPdf = ct.includes("pdf");
+        const fn = (att.filename || "").toLowerCase();
+        const isPdf = ct.includes("pdf") || (ct.includes("octet-stream") && fn.endsWith(".pdf"));
         const supportedImages = ["image/jpeg", "image/png", "image/gif", "image/webp"];
         const isImage = supportedImages.some(s => ct.includes(s.split("/")[1]));
         if (!isPdf && !isImage) continue;
