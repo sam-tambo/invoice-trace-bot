@@ -9,7 +9,7 @@ const corsHeaders = {
 const NYLAS_API_KEY = Deno.env.get("NYLAS_API_KEY") || "";
 const NYLAS_CLIENT_ID = Deno.env.get("NYLAS_CLIENT_ID") || "";
 const NYLAS_CALLBACK_URI = Deno.env.get("NYLAS_CALLBACK_URI") || "";
-const APP_URL = "https://invoice-trace-bot.lovable.app";
+const APP_URL = Deno.env.get("APP_URL") || "https://invoice-trace-bot.lovable.app";
 
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") {

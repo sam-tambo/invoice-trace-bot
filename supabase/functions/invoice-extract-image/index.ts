@@ -92,39 +92,6 @@ async function tryOpenAI(image_base64: string, media_type: string): Promise<stri
   }
 }
 
-async function tryLovableAI(image_base64: string, media_type: string): Promise<string | null> {
-  const key = Deno.env.get("LOVABLE_API_KEY");
-  if (!key) return null;
-  try {
-    const res = await fetch("https://ai.gateway.lovable.dev/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${key}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        model: "google/gemini-2.5-flash",
-        max_tokens: 2048,
-        messages: [{
-          role: "user",
-          content: [
-            { type: "image_url", image_url: { url: `data:${media_type};base64,${image_base64}` } },
-            { type: "text", text: EXTRACTION_PROMPT },
-          ],
-        }],
-      }),
-    });
-    if (!res.ok) {
-      console.error("Lovable AI error:", res.status, await res.text());
-      return null;
-    }
-    const data = await res.json();
-    return data.choices?.[0]?.message?.content || null;
-  } catch (e) {
-    console.error("Lovable AI exception:", e);
-    return null;
-  }
-}
 
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") {
@@ -184,7 +151,7 @@ Deno.serve(async (req) => {
 
     const mType = media_type || "image/jpeg";
 
-    // Cascade: Anthropic → OpenAI → Lovable AI (Gemini)
+    // Cascade: Anthropic → OpenAI
     console.log("Trying Anthropic...");
     let textContent = await tryAnthropic(image_base64, mType);
     let provider = "anthropic";
@@ -193,12 +160,6 @@ Deno.serve(async (req) => {
       console.log("Anthropic failed, trying OpenAI...");
       textContent = await tryOpenAI(image_base64, mType);
       provider = "openai";
-    }
-
-    if (!textContent) {
-      console.log("OpenAI failed, trying Lovable AI...");
-      textContent = await tryLovableAI(image_base64, mType);
-      provider = "lovable-ai";
     }
 
     if (!textContent) {

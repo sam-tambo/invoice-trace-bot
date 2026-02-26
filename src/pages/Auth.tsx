@@ -1,7 +1,6 @@
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { supabase } from "@/integrations/supabase/client";
-import { lovable } from "@/integrations/lovable/index";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -164,17 +163,11 @@ const Auth = () => {
             disabled={googleLoading}
             onClick={async () => {
               setGoogleLoading(true);
-              // On mobile browsers, always use the published domain for reliable OAuth redirect
-              const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
-              const origin = window.location.origin;
-              const isStandardLovable = origin.includes('lovable.app');
-              const redirectUri = isMobile
-                ? 'https://invoice-trace-bot.lovable.app'
-                : isStandardLovable
-                  ? origin
-                  : 'https://invoice-trace-bot.lovable.app';
-              const { error } = await lovable.auth.signInWithOAuth("google", {
-                redirect_uri: redirectUri,
+              const { error } = await supabase.auth.signInWithOAuth({
+                provider: 'google',
+                options: {
+                  redirectTo: window.location.origin,
+                },
               });
               if (error) {
                 toast({ title: "Erro", description: String(error), variant: "destructive" });
