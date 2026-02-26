@@ -137,10 +137,12 @@ Deno.serve(async (req) => {
 
       const provider = tokenData.provider || "unknown";
 
+      // Check if this exact email is already connected for this company
       const { data: existing } = await serviceDb
         .from("email_connections")
         .select("id")
         .eq("company_id", company_id)
+        .eq("email_address", email || "")
         .maybeSingle();
 
       const connectionData = {
@@ -155,8 +157,10 @@ Deno.serve(async (req) => {
       };
 
       if (existing) {
+        // Same email re-authorized — update tokens
         await serviceDb.from("email_connections").update(connectionData).eq("id", existing.id);
       } else {
+        // New mailbox — insert
         await serviceDb.from("email_connections").insert({
           company_id,
           ...connectionData,
