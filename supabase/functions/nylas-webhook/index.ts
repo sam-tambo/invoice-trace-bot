@@ -8,6 +8,70 @@ const corsHeaders = {
 
 const NYLAS_BASE = "https://api.us.nylas.com/v3";
 
+async function tryParseWithAI(contentBase64: string, contentType: string): Promise<any | null> {
+  // Try Anthropic first
+  const anthropicKey = Deno.env.get("ANTHROPIC_API_KEY");
+  if (anthropicKey) {
+    try {
+      const res = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: {
+          "x-api-key": anthropicKey,
+          "anthropic-version": "2023-06-01",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          model: "claude-sonnet-4-20250514",
+          max_tokens: 2048,
+          messages: [{
+            role: "user",
+            content: [
+              { type: "image", source: { type: "base64", media_type: contentType, data: contentBase64 } },
+              { type: "text", text: `Analisa este documento e diz-me se é uma fatura. Se sim, extrai: invoice_number, amount (total com IVA), net_amount, vat_amount, issue_date (YYYY-MM-DD), due_date (YYYY-MM-DD), supplier_nif. Responde APENAS em JSON: {"is_invoice": true/false, "invoice_number": "...", "amount": 0, "net_amount": 0, "vat_amount": 0, "issue_date": "...", "due_date": "...", "supplier_nif": "..."}` },
+            ],
+          }],
+        }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        const text = data.content?.[0]?.text || "";
+        const jsonMatch = text.match(/\{[\s\S]*\}/);
+        if (jsonMatch) return JSON.parse(jsonMatch[0]);
+      }
+    } catch (e) { console.error("Anthropic parse error:", e); }
+  }
+
+  // Try OpenAI
+  const openaiKey = Deno.env.get("OPENAI_API_KEY");
+  if (openaiKey) {
+    try {
+      const res = await fetch("https://api.openai.com/v1/chat/completions", {
+        method: "POST",
+        headers: { Authorization: `Bearer ${openaiKey}`, "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: "gpt-4o",
+          max_tokens: 2048,
+          messages: [{
+            role: "user",
+            content: [
+              { type: "image_url", image_url: { url: `data:${contentType};base64,${contentBase64}` } },
+              { type: "text", text: `Analisa este documento e diz-me se é uma fatura. Se sim, extrai: invoice_number, amount (total com IVA), net_amount, vat_amount, issue_date (YYYY-MM-DD), due_date (YYYY-MM-DD), supplier_nif. Responde APENAS em JSON: {"is_invoice": true/false, "invoice_number": "...", "amount": 0, "net_amount": 0, "vat_amount": 0, "issue_date": "...", "due_date": "...", "supplier_nif": "..."}` },
+            ],
+          }],
+        }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        const text = data.choices?.[0]?.message?.content || "";
+        const jsonMatch = text.match(/\{[\s\S]*\}/);
+        if (jsonMatch) return JSON.parse(jsonMatch[0]);
+      }
+    } catch (e) { console.error("OpenAI parse error:", e); }
+  }
+
+  return null;
+}
+
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") {
     return new Response(null, { headers: corsHeaders });
@@ -30,13 +94,11 @@ Deno.serve(async (req) => {
     const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
     const serviceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
     const nylasApiKey = Deno.env.get("NYLAS_API_KEY")!;
-    const lovableApiKey = Deno.env.get("LOVABLE_API_KEY");
     const db = createClient(supabaseUrl, serviceKey);
 
     const payload = await req.json();
     console.log("Nylas webhook received:", JSON.stringify(payload).slice(0, 500));
 
-    // Nylas sends { specversion, type, source, id, data: { object: {...} } }
     const webhookData = payload.data?.object || payload.data || payload;
     const grantId = webhookData.grant_id || payload.data?.grant_id;
 
@@ -48,7 +110,6 @@ Deno.serve(async (req) => {
       });
     }
 
-    // Find the email_connection by grant_id (stored in access_token)
     const { data: conn } = await db
       .from("email_connections")
       .select("company_id, user_id")
@@ -111,8 +172,8 @@ Deno.serve(async (req) => {
     let matchedInvoiceId: string | null = null;
     let attachmentsParsed = false;
 
-    // Process attachments with AI
-    if (attachments.length > 0 && lovableApiKey) {
+    // Process attachments with AI (Anthropic → OpenAI cascade)
+    if (attachments.length > 0) {
       for (const att of attachments) {
         // Download attachment
         const dlRes = await fetch(
@@ -128,46 +189,8 @@ Deno.serve(async (req) => {
         const b64Data = btoa(String.fromCharCode(...fileBuffer));
 
         try {
-          const aiRes = await fetch("https://ai.gateway.lovable.dev/v1/chat/completions", {
-            method: "POST",
-            headers: {
-              Authorization: `Bearer ${lovableApiKey}`,
-              "Content-Type": "application/json",
-            },
-            body: JSON.stringify({
-              model: "google/gemini-2.5-flash",
-              messages: [
-                {
-                  role: "user",
-                  content: [
-                    {
-                      type: "image_url",
-                      image_url: {
-                        url: `data:${att.content_type};base64,${b64Data}`,
-                      },
-                    },
-                    {
-                      type: "text",
-                      text: `Analisa este documento e diz-me se é uma fatura. Se sim, extrai: invoice_number, amount (total com IVA), net_amount, vat_amount, issue_date (YYYY-MM-DD), due_date (YYYY-MM-DD), supplier_nif. Responde APENAS em JSON: {"is_invoice": true/false, "invoice_number": "...", "amount": 0, "net_amount": 0, "vat_amount": 0, "issue_date": "...", "due_date": "...", "supplier_nif": "..."}`,
-                    },
-                  ],
-                },
-              ],
-            }),
-          });
-
-          if (!aiRes.ok) {
-            console.error("AI parse error:", aiRes.status, await aiRes.text());
-            continue;
-          }
-
-          const aiData = await aiRes.json();
-          const textContent = aiData.choices?.[0]?.message?.content || "";
-          const jsonMatch = textContent.match(/\{[\s\S]*\}/);
-          if (!jsonMatch) continue;
-
-          const parsed = JSON.parse(jsonMatch[0]);
-          if (!parsed.is_invoice) continue;
+          const parsed = await tryParseWithAI(b64Data, att.content_type);
+          if (!parsed?.is_invoice) continue;
 
           attachmentsParsed = true;
 
@@ -249,7 +272,6 @@ Deno.serve(async (req) => {
               uploaded_by: conn.user_id || "00000000-0000-0000-0000-000000000000",
             });
           } else if (parsed.invoice_number) {
-            // Create new invoice from unmatched email attachment
             const { data: newInvoice } = await db
               .from("invoices")
               .insert({
@@ -318,7 +340,7 @@ Deno.serve(async (req) => {
   } catch (err) {
     console.error("nylas-webhook error:", err);
     return new Response(JSON.stringify({ error: String(err) }), {
-      status: 200, // Return 200 to prevent Nylas from retrying
+      status: 200,
       headers: { ...corsHeaders, "Content-Type": "application/json" },
     });
   }
