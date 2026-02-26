@@ -197,20 +197,19 @@ Deno.serve(async (req) => {
 
     const db = createClient(supabaseUrl, serviceKey);
 
-    const { data: conn } = await db
+    const { data: allConnections } = await db
       .from("email_connections")
       .select("*")
-      .eq("company_id", company_id)
-      .maybeSingle();
+      .eq("company_id", company_id);
 
-    if (!conn || !conn.access_token) {
+    const validConnections = (allConnections || []).filter(c => c.access_token);
+
+    if (validConnections.length === 0) {
       return new Response(
         JSON.stringify({ error: "Email não ligado. Ligue primeiro nas Definições." }),
         { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
       );
     }
-
-    const grantId = conn.access_token;
 
     const { data: invoices } = await db
       .from("invoices")
@@ -255,13 +254,13 @@ Deno.serve(async (req) => {
       msg: any;
       pass: number;
       targetNif: string;
-      targetInvoiceId?: string; // Set when Pass 1 found this email searching for a specific invoice
+      targetInvoiceId?: string;
+      grantId: string;
     }
     const candidates: CandidateMessage[] = [];
 
-    function addCandidate(msg: any, pass: number, targetNif: string, targetInvoiceId?: string) {
+    function addCandidate(msg: any, pass: number, targetNif: string, grantId: string, targetInvoiceId?: string) {
       if (seenMessageIds.has(msg.id)) {
-        // If already seen but now we have a more specific targetInvoiceId, update it
         if (targetInvoiceId) {
           const existing = candidates.find(c => c.msg.id === msg.id);
           if (existing && !existing.targetInvoiceId) {
@@ -271,80 +270,78 @@ Deno.serve(async (req) => {
         return;
       }
       seenMessageIds.add(msg.id);
-      candidates.push({ msg, pass, targetNif, targetInvoiceId });
+      candidates.push({ msg, pass, targetNif, grantId, targetInvoiceId });
     }
 
     // ============================================================
-    // PASS 1: Search EACH invoice number with MULTIPLE query variations
-    // This is the critical pass — try every possible search string
+    // SEARCH ACROSS ALL CONNECTED MAILBOXES
     // ============================================================
-    for (const inv of invoices) {
-      if (!inv.invoice_number || matchedInvoiceIds.has(inv.id)) continue;
-      
-      const queries = generateSearchQueries(inv.invoice_number);
-      console.log(`Pass 1 — Invoice "${inv.invoice_number}" → ${queries.length} search variations: ${JSON.stringify(queries)}`);
-      
-      let foundAny = false;
-      for (const query of queries) {
-        if (query.length < 4) continue;
+    for (const conn of validConnections) {
+      const grantId = conn.access_token;
+      console.log(`\n=== Scanning mailbox: ${conn.email_address || conn.id} (${conn.provider}) ===`);
+
+      // PASS 1: Search EACH invoice number with MULTIPLE query variations
+      for (const inv of invoices) {
+        if (!inv.invoice_number || matchedInvoiceIds.has(inv.id)) continue;
         
-        const msgs = await searchNylasMessages(nylasApiKey, grantId, query, 10);
-        if (msgs.length > 0) {
-          console.log(`  ✓ Found ${msgs.length} emails for query: "${query}"`);
-          for (const msg of msgs) addCandidate(msg, 1, inv.supplier_nif, inv.id);
-          foundAny = true;
-          // Don't break — but if we already found results, skip remaining variations
-          // to save API calls. First hit is usually enough.
-          break;
-        } else {
-          console.log(`  ✗ No results for: "${query}"`);
+        const queries = generateSearchQueries(inv.invoice_number);
+        console.log(`Pass 1 — Invoice "${inv.invoice_number}" → ${queries.length} search variations`);
+        
+        let foundAny = false;
+        for (const query of queries) {
+          if (query.length < 4) continue;
+          
+          const msgs = await searchNylasMessages(nylasApiKey, grantId, query, 10);
+          if (msgs.length > 0) {
+            console.log(`  ✓ Found ${msgs.length} emails for query: "${query}"`);
+            for (const msg of msgs) addCandidate(msg, 1, inv.supplier_nif, grantId, inv.id);
+            foundAny = true;
+            break;
+          }
+        }
+        if (!foundAny) {
+          console.log(`  ⚠ NO emails found for "${inv.invoice_number}" in ${conn.email_address || conn.id}`);
         }
       }
-      if (!foundAny) {
-        console.log(`  ⚠ NO emails found for any of ${queries.length} variations of "${inv.invoice_number}"`);
+
+      // PASS 2: Search by supplier email/domain + has:attachment
+      for (const [nif, nifInvoices] of invoicesByNif) {
+        const remaining = nifInvoices.filter(i => !matchedInvoiceIds.has(i.id));
+        if (remaining.length === 0) continue;
+
+        const supplier = supplierMap.get(nif);
+        if (!supplier?.email) continue;
+
+        const email = supplier.email;
+        const domain = email.includes("@") ? email.split("@").pop() : email.replace(/^@/, "");
+        const genericDomains = ["gmail.com", "hotmail.com", "outlook.com", "yahoo.com", "live.com", "sapo.pt", "live.com.pt"];
+
+        if (domain && !genericDomains.includes(domain!)) {
+          const query = `from:${domain} has:attachment`;
+          const msgs = await searchNylasMessages(nylasApiKey, grantId, query, 10);
+          for (const msg of msgs) addCandidate(msg, 2, nif, grantId);
+        } else if (email.includes("@")) {
+          const query = `from:${email} has:attachment`;
+          const msgs = await searchNylasMessages(nylasApiKey, grantId, query, 10);
+          for (const msg of msgs) addCandidate(msg, 2, nif, grantId);
+        }
       }
-    }
 
-    // --- PASS 2: Search by supplier email/domain + has:attachment ---
-    for (const [nif, nifInvoices] of invoicesByNif) {
-      const remaining = nifInvoices.filter(i => !matchedInvoiceIds.has(i.id));
-      if (remaining.length === 0) continue;
+      // PASS 3: Search by supplier name
+      for (const [nif, nifInvoices] of invoicesByNif) {
+        const remaining = nifInvoices.filter(i => !matchedInvoiceIds.has(i.id));
+        if (remaining.length === 0) continue;
 
-      const supplier = supplierMap.get(nif);
-      if (!supplier?.email) continue;
+        const supplier = supplierMap.get(nif);
+        const name = supplier?.name || supplier?.legal_name || nifInvoices[0]?.supplier_name;
+        if (!name) continue;
 
-      const email = supplier.email;
-      const domain = email.includes("@") ? email.split("@").pop() : email.replace(/^@/, "");
-      const genericDomains = ["gmail.com", "hotmail.com", "outlook.com", "yahoo.com", "live.com", "sapo.pt", "live.com.pt"];
-
-      if (domain && !genericDomains.includes(domain!)) {
-        const query = `from:${domain} has:attachment`;
-        console.log(`Pass 2 - NIF ${nif}: ${query}`);
-        const msgs = await searchNylasMessages(nylasApiKey, grantId, query, 10);
-        for (const msg of msgs) addCandidate(msg, 2, nif);
-      } else if (email.includes("@")) {
-        const query = `from:${email} has:attachment`;
-        console.log(`Pass 2 - NIF ${nif}: ${query}`);
-        const msgs = await searchNylasMessages(nylasApiKey, grantId, query, 10);
-        for (const msg of msgs) addCandidate(msg, 2, nif);
+        const shortName = name.split(/[,\-]/).map((p: string) => p.trim()).filter(Boolean)[0] || name;
+        const query = `${shortName} has:attachment`;
+        const msgs = await searchNylasMessages(nylasApiKey, grantId, query, 8);
+        for (const msg of msgs) addCandidate(msg, 3, nif, grantId);
       }
-    }
-
-    // --- PASS 3: Search by supplier name ---
-    for (const [nif, nifInvoices] of invoicesByNif) {
-      const remaining = nifInvoices.filter(i => !matchedInvoiceIds.has(i.id));
-      if (remaining.length === 0) continue;
-
-      const supplier = supplierMap.get(nif);
-      const name = supplier?.name || supplier?.legal_name || nifInvoices[0]?.supplier_name;
-      if (!name) continue;
-
-      const shortName = name.split(/[,\-]/).map((p: string) => p.trim()).filter(Boolean)[0] || name;
-      const query = `${shortName} has:attachment`;
-      console.log(`Pass 3 - NIF ${nif}: ${query}`);
-      const msgs = await searchNylasMessages(nylasApiKey, grantId, query, 8);
-      for (const msg of msgs) addCandidate(msg, 3, nif);
-    }
+    } // end connections loop
 
     totalEmailsFound = candidates.length;
     console.log(`Total candidate emails: ${totalEmailsFound}`);
@@ -355,7 +352,7 @@ Deno.serve(async (req) => {
     for (const candidate of candidates) {
       const { msg, pass, targetNif } = candidate;
 
-      const fullMsg = await getNylasMessage(nylasApiKey, grantId, msg.id) || msg;
+      const fullMsg = await getNylasMessage(nylasApiKey, candidate.grantId, msg.id) || msg;
 
       const subject = fullMsg.subject || "";
       const snippet = fullMsg.snippet || msg.snippet || "";
@@ -432,7 +429,7 @@ Deno.serve(async (req) => {
 
         for (const att of downloadableAttachments) {
           if (att.size && att.size > MAX_ATTACHMENT_SIZE) continue;
-          const fileData = await downloadNylasAttachment(nylasApiKey, grantId, att.id, msg.id);
+          const fileData = await downloadNylasAttachment(nylasApiKey, candidate.grantId, att.id, msg.id);
           if (fileData) {
             const fileBuffer = new Uint8Array(fileData);
             const filePath = `${company_id}/${matchedInvoice.supplier_nif}/${Date.now()}_${att.filename}`;
@@ -490,7 +487,7 @@ Deno.serve(async (req) => {
       for (const att of downloadableAttachments.slice(0, 2)) {
         if (att.size && att.size > MAX_ATTACHMENT_SIZE) continue;
 
-        const fileData = await downloadNylasAttachment(nylasApiKey, grantId, att.id, msg.id);
+        const fileData = await downloadNylasAttachment(nylasApiKey, candidate.grantId, att.id, msg.id);
         if (!fileData) continue;
 
         const fileBuffer = new Uint8Array(fileData);

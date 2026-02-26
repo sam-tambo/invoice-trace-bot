@@ -5,7 +5,7 @@ import { useAuth } from "@/hooks/useAuth";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { useToast } from "@/hooks/use-toast";
-import { Mail, Link2, Unlink, Loader2, CheckCircle2 } from "lucide-react";
+import { Mail, Link2, Unlink, Loader2, CheckCircle2, Plus } from "lucide-react";
 
 const PROVIDER_LABELS: Record<string, string> = {
   google: "Gmail",
@@ -19,25 +19,25 @@ const EmailConnectionCard = () => {
   const { selectedCompany } = useCompany();
   const { user } = useAuth();
   const { toast } = useToast();
-  const [connection, setConnection] = useState<any>(null);
+  const [connections, setConnections] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [connecting, setConnecting] = useState(false);
 
-  const fetchConnection = useCallback(async () => {
+  const fetchConnections = useCallback(async () => {
     if (!selectedCompany) return;
     setLoading(true);
     const { data } = await supabase
       .from("email_connections")
       .select("*")
       .eq("company_id", selectedCompany.id)
-      .maybeSingle();
-    setConnection(data);
+      .order("created_at", { ascending: true });
+    setConnections(data || []);
     setLoading(false);
   }, [selectedCompany]);
 
   useEffect(() => {
-    fetchConnection();
-  }, [fetchConnection]);
+    fetchConnections();
+  }, [fetchConnections]);
 
   // Handle Nylas callback result from URL params
   useEffect(() => {
@@ -51,7 +51,7 @@ const EmailConnectionCard = () => {
         description: address ? `Conta: ${address}` : "A conta foi ligada." 
       });
       window.history.replaceState({}, "", window.location.pathname);
-      fetchConnection();
+      fetchConnections();
     } else if (emailStatus === "denied") {
       toast({ 
         title: "Autorização negada", 
@@ -105,62 +105,68 @@ const EmailConnectionCard = () => {
     }
   };
 
-  const disconnectEmail = async () => {
-    if (!connection) return;
+  const disconnectEmail = async (connectionId: string) => {
     const { error } = await supabase
       .from("email_connections")
       .delete()
-      .eq("id", connection.id);
+      .eq("id", connectionId);
     if (error) {
       toast({ title: "Erro", description: error.message, variant: "destructive" });
     } else {
       toast({ title: "Email desligado." });
-      setConnection(null);
+      setConnections((prev) => prev.filter((c) => c.id !== connectionId));
     }
   };
 
   if (!selectedCompany) return null;
-
-  const providerLabel = connection ? (PROVIDER_LABELS[connection.provider] || "Email") : "";
 
   return (
     <Card>
       <CardHeader>
         <div className="flex items-center gap-2">
           <Mail className="h-5 w-5 text-muted-foreground" />
-          <CardTitle className="text-base">Caixa de Correio</CardTitle>
+          <CardTitle className="text-base">Caixas de Correio</CardTitle>
         </div>
         <CardDescription>
-          Ligue a sua conta de email (Gmail, Outlook, Yahoo) para procurar faturas automaticamente.
+          Ligue as suas contas de email (Gmail, Outlook, Yahoo) para procurar faturas automaticamente.
         </CardDescription>
       </CardHeader>
-      <CardContent>
+      <CardContent className="space-y-3">
         {loading ? (
           <div className="flex items-center gap-2 text-sm text-muted-foreground">
             <Loader2 className="h-4 w-4 animate-spin" /> A verificar...
           </div>
-        ) : connection ? (
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-2">
-              <CheckCircle2 className="h-4 w-4 text-green-500" />
-              <span className="text-sm">
-                {connection.email_address || "Ligado"}
-                {providerLabel && <span className="text-muted-foreground ml-1">({providerLabel})</span>}
-              </span>
-            </div>
-            <Button variant="outline" size="sm" onClick={disconnectEmail}>
-              <Unlink className="mr-2 h-4 w-4" /> Desligar
-            </Button>
-          </div>
         ) : (
-          <Button onClick={connectEmail} disabled={connecting} className="gap-2">
-            {connecting ? (
-              <Loader2 className="h-4 w-4 animate-spin" />
-            ) : (
-              <Link2 className="h-4 w-4" />
-            )}
-            {connecting ? "A ligar..." : "Ligar Email"}
-          </Button>
+          <>
+            {connections.map((conn) => {
+              const providerLabel = PROVIDER_LABELS[conn.provider] || "Email";
+              return (
+                <div key={conn.id} className="flex items-center justify-between rounded-lg border p-3">
+                  <div className="flex items-center gap-2">
+                    <CheckCircle2 className="h-4 w-4 text-green-500" />
+                    <span className="text-sm">
+                      {conn.email_address || "Ligado"}
+                      <span className="text-muted-foreground ml-1">({providerLabel})</span>
+                    </span>
+                  </div>
+                  <Button variant="outline" size="sm" onClick={() => disconnectEmail(conn.id)}>
+                    <Unlink className="mr-2 h-4 w-4" /> Desligar
+                  </Button>
+                </div>
+              );
+            })}
+
+            <Button onClick={connectEmail} disabled={connecting} variant={connections.length > 0 ? "outline" : "default"} className="gap-2">
+              {connecting ? (
+                <Loader2 className="h-4 w-4 animate-spin" />
+              ) : connections.length > 0 ? (
+                <Plus className="h-4 w-4" />
+              ) : (
+                <Link2 className="h-4 w-4" />
+              )}
+              {connecting ? "A ligar..." : connections.length > 0 ? "Adicionar outra conta" : "Ligar Email"}
+            </Button>
+          </>
         )}
       </CardContent>
     </Card>
