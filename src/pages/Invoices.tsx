@@ -33,6 +33,8 @@ import ScanGmailDialog from "@/components/ScanGmailDialog";
 import ShareInvoicesDialog from "@/components/ShareInvoicesDialog";
 
 type Invoice = Tables<"invoices">;
+type SupplierContact = { email: string | null; phone: string | null };
+
 
 const statusMap: Record<string, { label: string; variant: "default" | "secondary" | "destructive" | "outline"; className?: string }> = {
   missing: { label: "Em Falta", variant: "destructive" },
@@ -62,6 +64,7 @@ const Invoices = () => {
   const [gmailScanOpen, setGmailScanOpen] = useState(false);
   const [shareOpen, setShareOpen] = useState(false);
   const [hasEmail, setHasEmail] = useState(false);
+  const [supplierContactMap, setSupplierContactMap] = useState<Map<string, SupplierContact>>(new Map());
   const { toast } = useToast();
 
   const fetchInvoices = async () => {
@@ -78,12 +81,17 @@ const Invoices = () => {
 
   const fetchSuppliersWithEmail = async () => {
     if (!selectedCompany) return;
-    const { count } = await supabase
+    const { data, count } = await supabase
       .from("suppliers")
-      .select("id", { count: "exact", head: true })
-      .eq("company_id", selectedCompany.id)
-      .not("email", "is", null);
-    setSuppliersWithEmail(count || 0);
+      .select("nif, email, phone", { count: "exact" })
+      .eq("company_id", selectedCompany.id);
+    
+    const withEmail = (data || []).filter((s) => s.email);
+    setSuppliersWithEmail(withEmail.length);
+    
+    const contactMap = new Map<string, SupplierContact>();
+    (data || []).forEach((s) => contactMap.set(s.nif, { email: s.email, phone: s.phone }));
+    setSupplierContactMap(contactMap);
   };
 
   const bulkLookupSuppliers = async () => {
@@ -227,6 +235,7 @@ const Invoices = () => {
         <Table>
           <TableHeader>
             <TableRow>
+              <TableHead className="w-8"></TableHead>
               <TableHead>Fornecedor</TableHead>
               <TableHead>NIF</TableHead>
               <TableHead>Nº Fatura</TableHead>
@@ -240,7 +249,7 @@ const Invoices = () => {
           <TableBody>
             {filtered.length === 0 ? (
               <TableRow>
-                <TableCell colSpan={8} className="text-center py-10 text-muted-foreground">
+                <TableCell colSpan={9} className="text-center py-10 text-muted-foreground">
                   {loading ? "A carregar..." : "Nenhuma fatura encontrada."}
                 </TableCell>
               </TableRow>
@@ -249,6 +258,15 @@ const Invoices = () => {
                 const st = statusMap[inv.status] || statusMap.missing;
                 return (
                   <TableRow key={inv.id} className={cn(rowColorMap[inv.status], "cursor-pointer hover:bg-muted/50")} onClick={() => setSelectedInvoice(inv)}>
+                    <TableCell className="px-2">
+                      {(() => {
+                        const contact = supplierContactMap.get(inv.supplier_nif);
+                        if (!contact) return <span className="inline-block h-2.5 w-2.5 rounded-full bg-destructive" title="Sem contacto" />;
+                        if (contact.email) return <span className="inline-block h-2.5 w-2.5 rounded-full bg-success" title="Email disponível" />;
+                        if (contact.phone) return <span className="inline-block h-2.5 w-2.5 rounded-full bg-warning" title="Só telefone" />;
+                        return <span className="inline-block h-2.5 w-2.5 rounded-full bg-destructive" title="Sem contacto" />;
+                      })()}
+                    </TableCell>
                     <TableCell className="font-medium">{inv.supplier_name || "—"}</TableCell>
                     <TableCell className="font-mono text-xs">{inv.supplier_nif || "—"}</TableCell>
                     <TableCell>{inv.invoice_number}</TableCell>

@@ -146,11 +146,42 @@ const ImportInvoices = () => {
 
     if (error) {
       toast({ title: "Erro", description: error.message, variant: "destructive" });
-    } else {
-      toast({ title: "Importação concluída", description: `${insertRows.length} faturas importadas.` });
-      navigate("/invoices");
+      setImporting(false);
+      return;
     }
+
+    toast({ title: "Importação concluída", description: `${insertRows.length} faturas importadas. A enriquecer fornecedores...` });
+
+    // Auto-enrich: find unique NIFs not yet in suppliers table
+    const uniqueNifs = [...new Set(selected.map((r) => r.supplier_nif).filter(Boolean))];
+    const { data: existingSuppliers } = await supabase
+      .from("suppliers")
+      .select("nif")
+      .eq("company_id", selectedCompany.id)
+      .in("nif", uniqueNifs);
+
+    const existingNifSet = new Set((existingSuppliers || []).map((s) => s.nif));
+    const newNifs = uniqueNifs.filter((nif) => !existingNifSet.has(nif));
+
+    if (newNifs.length > 0) {
+      let enriched = 0;
+      for (const nif of newNifs) {
+        try {
+          const { data } = await supabase.functions.invoke("nif-lookup", {
+            body: { nif, company_id: selectedCompany.id },
+          });
+          if (data?.success) enriched++;
+        } catch {
+          // Continue with next
+        }
+      }
+      if (enriched > 0) {
+        toast({ title: "Fornecedores enriquecidos", description: `${enriched} de ${newNifs.length} novos fornecedores encontrados automaticamente.` });
+      }
+    }
+
     setImporting(false);
+    navigate("/invoices");
   };
 
   const lookupSingleNif = async (idx: number) => {
