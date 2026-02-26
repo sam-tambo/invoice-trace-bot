@@ -12,8 +12,9 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { Search, Pencil, Check, X } from "lucide-react";
+import { Search, Pencil, Check, X, RefreshCw, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { Progress } from "@/components/ui/progress";
 import { toast } from "sonner";
 
 type Supplier = Tables<"suppliers">;
@@ -33,6 +34,8 @@ const Suppliers = () => {
   const [editEmail, setEditEmail] = useState("");
   const [editPhone, setEditPhone] = useState("");
   const [saving, setSaving] = useState(false);
+  const [enriching, setEnriching] = useState(false);
+  const [enrichProgress, setEnrichProgress] = useState({ done: 0, total: 0 });
 
   const startEdit = (s: SupplierWithInvoices) => {
     setEditingId(s.id);
@@ -62,6 +65,53 @@ const Suppliers = () => {
     toast.success("Contacto atualizado");
   };
 
+  const bulkEnrich = async () => {
+    if (!selectedCompany) return;
+    const toEnrich = suppliers.filter((s) => !s.lookup_success);
+    if (toEnrich.length === 0) {
+      toast.info("Todos os fornecedores já estão enriquecidos.");
+      return;
+    }
+    setEnriching(true);
+    setEnrichProgress({ done: 0, total: toEnrich.length });
+    let success = 0;
+    for (let i = 0; i < toEnrich.length; i++) {
+      try {
+        const { data } = await supabase.functions.invoke("nif-lookup", {
+          body: { nif: toEnrich[i].nif, company_id: selectedCompany.id },
+        });
+        if (data?.success) success++;
+      } catch {}
+      setEnrichProgress({ done: i + 1, total: toEnrich.length });
+    }
+    setEnriching(false);
+    toast.success(`${success} de ${toEnrich.length} fornecedores enriquecidos.`);
+    // Reload data
+    if (selectedCompany) {
+      const { data: suppliersData } = await supabase
+        .from("suppliers")
+        .select("*")
+        .eq("company_id", selectedCompany.id)
+        .order("name");
+      const { data: invoicesData } = await supabase
+        .from("invoices")
+        .select("supplier_nif, amount")
+        .eq("company_id", selectedCompany.id);
+      const invoiceAgg = new Map<string, { count: number; total: number }>();
+      (invoicesData || []).forEach((inv) => {
+        if (!inv.supplier_nif) return;
+        const existing = invoiceAgg.get(inv.supplier_nif) || { count: 0, total: 0 };
+        existing.count += 1;
+        existing.total += Number(inv.amount) || 0;
+        invoiceAgg.set(inv.supplier_nif, existing);
+      });
+      setSuppliers((suppliersData || []).map((s) => {
+        const agg = invoiceAgg.get(s.nif) || { count: 0, total: 0 };
+        return { ...s, invoiceCount: agg.count, invoiceTotal: agg.total };
+      }));
+    }
+  };
+
   useEffect(() => {
     if (!selectedCompany) return;
     const fetchData = async () => {
@@ -77,8 +127,6 @@ const Suppliers = () => {
           .select("supplier_nif, amount")
           .eq("company_id", selectedCompany.id),
       ]);
-
-      // Aggregate invoices by supplier NIF
       const invoiceAgg = new Map<string, { count: number; total: number }>();
       (invoicesData || []).forEach((inv) => {
         if (!inv.supplier_nif) return;
@@ -87,13 +135,10 @@ const Suppliers = () => {
         existing.total += Number(inv.amount) || 0;
         invoiceAgg.set(inv.supplier_nif, existing);
       });
-
-      const enriched: SupplierWithInvoices[] = (suppliersData || []).map((s) => {
+      setSuppliers((suppliersData || []).map((s) => {
         const agg = invoiceAgg.get(s.nif) || { count: 0, total: 0 };
         return { ...s, invoiceCount: agg.count, invoiceTotal: agg.total };
-      });
-
-      setSuppliers(enriched);
+      }));
       setLoading(false);
     };
     fetchData();
@@ -112,10 +157,20 @@ const Suppliers = () => {
 
   return (
     <div className="space-y-6">
-      <div>
-        <h1 className="text-2xl font-bold">Fornecedores</h1>
-        <p className="text-muted-foreground">Dados dos fornecedores encontrados automaticamente.</p>
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 className="text-2xl font-bold">Fornecedores</h1>
+          <p className="text-muted-foreground">Dados dos fornecedores encontrados automaticamente.</p>
+        </div>
+        <Button onClick={bulkEnrich} disabled={enriching} variant="outline" className="gap-2">
+          {enriching ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
+          {enriching ? `A enriquecer (${enrichProgress.done}/${enrichProgress.total})` : "Enriquecer Todos"}
+        </Button>
       </div>
+
+      {enriching && (
+        <Progress value={(enrichProgress.done / enrichProgress.total) * 100} className="h-2" />
+      )}
 
       <div className="relative max-w-md">
         <Search className="absolute left-3 top-3 h-4 w-4 text-muted-foreground" />
@@ -126,6 +181,7 @@ const Suppliers = () => {
         <Table>
           <TableHeader>
             <TableRow>
+              <TableHead className="w-8"></TableHead>
               <TableHead>Nome</TableHead>
               <TableHead>Email</TableHead>
               <TableHead>Telefone</TableHead>
@@ -137,13 +193,22 @@ const Suppliers = () => {
           <TableBody>
             {filtered.length === 0 ? (
               <TableRow>
-                <TableCell colSpan={6} className="text-center py-10 text-muted-foreground">
+                <TableCell colSpan={7} className="text-center py-10 text-muted-foreground">
                   {loading ? "A carregar..." : "Nenhum fornecedor encontrado."}
                 </TableCell>
               </TableRow>
             ) : (
               filtered.map((s) => (
                 <TableRow key={s.id}>
+                  <TableCell className="px-2">
+                    {s.email ? (
+                      <span className="inline-block h-2.5 w-2.5 rounded-full bg-success" title="Email disponível" />
+                    ) : s.phone ? (
+                      <span className="inline-block h-2.5 w-2.5 rounded-full bg-warning" title="Só telefone" />
+                    ) : (
+                      <span className="inline-block h-2.5 w-2.5 rounded-full bg-destructive" title="Sem contacto" />
+                    )}
+                  </TableCell>
                   <TableCell>
                     <div>
                       <span className="font-medium">{s.legal_name || s.name}</span>

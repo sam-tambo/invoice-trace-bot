@@ -22,7 +22,8 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { Mail, MessageSquare, Send, Upload, FileText, Link2, Loader2, Trash2 } from "lucide-react";
+import { Mail, MessageSquare, Send, Upload, FileText, Link2, Loader2 } from "lucide-react";
+import SupplierCard from "@/components/SupplierCard";
 import { format } from "date-fns";
 import { pt } from "date-fns/locale";
 
@@ -280,6 +281,14 @@ export default function InvoiceContactDialog({ invoice, onClose, onStatusChange 
               <div><span className="text-muted-foreground">Origem:</span> {invoice.source === "scan" ? "📷 Digitalização" : invoice.source === "email" ? "📧 Email" : "✍️ Manual"}</div>
             )}
           </div>
+
+          {/* Supplier enriched info */}
+          {supplier && supplier.lookup_success && (
+            <div className="space-y-1">
+              <h4 className="text-sm font-semibold">Dados do Fornecedor</h4>
+              <SupplierCard supplier={supplier} />
+            </div>
+          )}
 
           {/* Contact buttons */}
           {!contactMode && (
