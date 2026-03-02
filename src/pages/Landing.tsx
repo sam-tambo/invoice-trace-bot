@@ -14,6 +14,14 @@ import {
   Zap,
   BarChart3,
   Globe,
+  Inbox,
+  Mailbox,
+  Users,
+  ScanLine,
+  Import,
+  Link2,
+  Search,
+  Gift,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 
@@ -39,6 +47,9 @@ const Landing = () => {
             <a href="#integrations" className="text-sm font-medium text-muted-foreground transition-colors hover:text-foreground">
               Integrações
             </a>
+            <a href="#pricing" className="text-sm font-medium text-muted-foreground transition-colors hover:text-foreground">
+              Preços
+            </a>
           </div>
           <div className="flex items-center gap-3">
             <Link to="/auth">
@@ -48,7 +59,7 @@ const Landing = () => {
             </Link>
             <Link to="/auth">
               <Button size="sm" className="gap-1.5 text-sm font-semibold">
-                Começar Agora
+                Começar Grátis
                 <ArrowRight className="h-4 w-4" />
               </Button>
             </Link>
@@ -66,6 +77,10 @@ const Landing = () => {
 
         <div className="relative mx-auto max-w-7xl px-6">
           <div className="mx-auto max-w-4xl text-center">
+            <div className="mb-4 inline-flex items-center gap-2 rounded-full border border-primary/30 bg-primary/10 px-4 py-1.5 text-sm font-semibold text-primary shadow-sm">
+              <Gift className="h-4 w-4" />
+              100% Gratuito — Para sempre
+            </div>
             <div className="mb-6 inline-flex items-center gap-2 rounded-full border border-border bg-card px-4 py-1.5 text-sm font-medium text-muted-foreground shadow-sm">
               <Zap className="h-3.5 w-3.5 text-primary" />
               Gestão inteligente de faturas para empresas portuguesas
@@ -79,7 +94,7 @@ const Landing = () => {
             <p className="mx-auto mb-10 max-w-2xl text-lg leading-relaxed text-muted-foreground sm:text-xl">
               Fotografe, organize e recupere todas as suas faturas automaticamente.
               Sincronize diretamente com o TOConline e partilhe com a sua contabilidade
-              — tudo numa única plataforma.
+              — tudo numa única plataforma, totalmente grátis.
             </p>
             <div className="flex flex-col items-center justify-center gap-4 sm:flex-row">
               <Link to="/auth">
@@ -94,6 +109,9 @@ const Landing = () => {
                 </Button>
               </a>
             </div>
+            <p className="mt-4 text-sm text-muted-foreground">
+              Sem cartão de crédito · Sem limites · Sem período de teste
+            </p>
           </div>
 
           {/* Hero visual — abstract dashboard mockup */}
@@ -246,20 +264,14 @@ const Landing = () => {
             </p>
           </div>
 
-          <div className="grid gap-6 sm:grid-cols-2 lg:grid-cols-3">
+          <div className="grid gap-6 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
             {[
               {
-                icon: Camera,
-                title: "Captura por Fotografia",
+                icon: ScanLine,
+                title: "Digitalização OCR com IA",
                 description:
-                  "Tire uma foto a qualquer fatura com o telemóvel. O OCR inteligente extrai automaticamente número, NIF, valor e data.",
+                  "Fotografe ou faça upload de faturas. A IA extrai automaticamente número, NIF, valor, data e fornecedor.",
                 highlight: true,
-              },
-              {
-                icon: Calendar,
-                title: "Organização Inteligente",
-                description:
-                  "Faturas organizadas automaticamente por mês, dia e fornecedor. Pesquise e filtre com um clique.",
               },
               {
                 icon: Mail,
@@ -268,28 +280,71 @@ const Landing = () => {
                   "Ligação direta ao Gmail para varrimento automático de emails com faturas. Identificação e associação automática.",
               },
               {
+                icon: Mailbox,
+                title: "Múltiplas Caixas de Email",
+                description:
+                  "Conecte várias contas Gmail à sua empresa. Centralize todas as faturas de diferentes caixas de correio.",
+              },
+              {
+                icon: Inbox,
+                title: "Inbox de Respostas",
+                description:
+                  "Receba e visualize respostas dos fornecedores diretamente na aplicação. Sem trocar de ferramenta.",
+              },
+              {
+                icon: Send,
+                title: "Email em Massa",
+                description:
+                  "Envie pedidos de faturas a múltiplos fornecedores de uma só vez com modelos de email personalizáveis.",
+              },
+              {
+                icon: Calendar,
+                title: "Calendário de Faturas",
+                description:
+                  "Visualize todas as suas faturas num calendário por data de vencimento. Nunca perca um prazo.",
+              },
+              {
+                icon: Import,
+                title: "Importação e-Fatura",
+                description:
+                  "Importe PDFs diretamente do portal e-Fatura da Autoridade Tributária portuguesa.",
+                highlight: true,
+              },
+              {
+                icon: Search,
+                title: "Pesquisa NIF Automática",
+                description:
+                  "Enriqueça automaticamente os dados dos fornecedores a partir do NIF — nome, morada, CAE e contactos.",
+              },
+              {
+                icon: Link2,
+                title: "Links de Partilha",
+                description:
+                  "Partilhe faturas com o contabilista via link protegido por password. Acesso seguro e controlado.",
+              },
+              {
                 icon: Send,
                 title: "Contacto Automático",
                 description:
-                  "Envie pedidos de faturas em falta aos fornecedores com modelos personalizáveis. Acompanhe respostas em tempo real.",
+                  "Envie pedidos de faturas em falta com modelos personalizáveis e acompanhe respostas em tempo real.",
               },
               {
                 icon: RefreshCw,
                 title: "Sincronização TOConline",
                 description:
-                  "Sincronize as suas faturas diretamente com o TOConline. Elimine a entrada manual de dados na contabilidade.",
+                  "Sincronize as suas faturas diretamente com o TOConline. Elimine a entrada manual na contabilidade.",
                 highlight: true,
               },
               {
                 icon: Shield,
                 title: "Portal de Contabilidade",
                 description:
-                  "Partilhe faturas com o seu contabilista através de um link protegido por password. Acesso seguro e controlado.",
+                  "O seu contabilista acede a um portal dedicado com todas as faturas organizadas e prontas para processar.",
               },
             ].map((feature) => (
               <div
                 key={feature.title}
-                className={`group relative rounded-2xl border p-8 transition-all hover:shadow-lg ${
+                className={`group relative rounded-2xl border p-7 transition-all hover:shadow-lg ${
                   feature.highlight
                     ? "border-primary/30 bg-card shadow-md shadow-primary/5"
                     : "border-border bg-card hover:shadow-primary/5"
@@ -299,16 +354,16 @@ const Landing = () => {
                   <div className="absolute -top-px left-8 right-8 h-px bg-gradient-to-r from-transparent via-primary to-transparent" />
                 )}
                 <div
-                  className={`mb-5 flex h-12 w-12 items-center justify-center rounded-xl ${
+                  className={`mb-4 flex h-11 w-11 items-center justify-center rounded-xl ${
                     feature.highlight
                       ? "bg-primary text-primary-foreground shadow-lg shadow-primary/25"
                       : "bg-primary/10 text-primary"
                   }`}
                 >
-                  <feature.icon className="h-6 w-6" />
+                  <feature.icon className="h-5 w-5" />
                 </div>
-                <h3 className="mb-3 text-lg font-bold">{feature.title}</h3>
-                <p className="leading-relaxed text-muted-foreground">{feature.description}</p>
+                <h3 className="mb-2 text-base font-bold">{feature.title}</h3>
+                <p className="text-sm leading-relaxed text-muted-foreground">{feature.description}</p>
               </div>
             ))}
           </div>
@@ -370,8 +425,66 @@ const Landing = () => {
         </div>
       </section>
 
+      {/* Pricing — 100% Free */}
+      <section id="pricing" className="border-t border-border bg-muted/20 py-24 lg:py-32">
+        <div className="mx-auto max-w-7xl px-6">
+          <div className="mx-auto max-w-3xl text-center">
+            <div className="mb-4 inline-flex items-center gap-2 rounded-full border border-primary/30 bg-primary/10 px-4 py-1.5 text-sm font-semibold text-primary">
+              <Gift className="h-4 w-4" />
+              Preços
+            </div>
+            <h2 className="mb-4 text-3xl font-bold tracking-tight sm:text-4xl lg:text-5xl">
+              100% Gratuito.{" "}
+              <span className="bg-gradient-to-r from-primary to-[hsl(230,80%,60%)] bg-clip-text text-transparent">
+                Para sempre.
+              </span>
+            </h2>
+            <p className="mb-12 text-lg text-muted-foreground">
+              Sem planos pagos, sem limites escondidos, sem surpresas. Todas as funcionalidades incluídas.
+            </p>
+
+            <div className="mx-auto max-w-lg rounded-3xl border-2 border-primary/30 bg-card p-10 shadow-xl shadow-primary/5">
+              <div className="mb-6">
+                <span className="text-5xl font-extrabold">0€</span>
+                <span className="ml-2 text-lg text-muted-foreground">/mês</span>
+              </div>
+              <ul className="mb-8 space-y-3 text-left">
+                {[
+                  "Faturas ilimitadas",
+                  "Fornecedores ilimitados",
+                  "Digitalização OCR com IA",
+                  "Integração Gmail (múltiplas contas)",
+                  "Importação e-Fatura",
+                  "Email em massa",
+                  "Inbox de respostas",
+                  "Calendário de faturas",
+                  "Pesquisa NIF automática",
+                  "Links de partilha seguros",
+                  "Sincronização TOConline",
+                  "Portal de contabilidade",
+                ].map((item) => (
+                  <li key={item} className="flex items-center gap-3">
+                    <CheckCircle2 className="h-5 w-5 shrink-0 text-primary" />
+                    <span className="font-medium">{item}</span>
+                  </li>
+                ))}
+              </ul>
+              <Link to="/auth">
+                <Button size="lg" className="w-full h-13 gap-2 text-base font-semibold shadow-lg shadow-primary/25">
+                  Começar Agora — É Grátis
+                  <ArrowRight className="h-5 w-5" />
+                </Button>
+              </Link>
+              <p className="mt-4 text-sm text-muted-foreground">
+                Sem cartão de crédito necessário
+              </p>
+            </div>
+          </div>
+        </div>
+      </section>
+
       {/* CTA */}
-      <section className="border-t border-border bg-muted/20 py-24 lg:py-32">
+      <section className="border-t border-border py-24 lg:py-32">
         <div className="mx-auto max-w-7xl px-6">
           <div className="mx-auto max-w-3xl text-center">
             <h2 className="mb-4 text-3xl font-bold tracking-tight sm:text-4xl lg:text-5xl">
@@ -393,7 +506,7 @@ const Landing = () => {
               </Link>
             </div>
             <p className="mt-5 text-sm text-muted-foreground">
-              Sem cartão de crédito · Configuração em 2 minutos
+              Sem cartão de crédito · Configuração em 2 minutos · 100% Gratuito
             </p>
           </div>
         </div>
